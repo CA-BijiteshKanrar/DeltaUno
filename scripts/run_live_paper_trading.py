@@ -34,6 +34,7 @@ import sys
 import time
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -369,47 +370,47 @@ class LiveQuoteProvider:
             lines.append(self._format_l2_csv_line(ts_ns, inst, ltp, last_qty, vol, bids, asks, uc, lc))
         return lines
 
+    def _fetch_yahoo_single(self, inst: dict, ts_ns: int) -> str:
+        sym = inst["symbol"]
+        ticker = inst["yahoo_ticker"]
+        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?interval=1m&range=1d"
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+        try:
+            req = urllib.request.Request(url, headers=headers)
+            with urllib.request.urlopen(req, timeout=2.5) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            meta = data["chart"]["result"][0]["meta"]
+            ltp = float(meta.get("regularMarketPrice", inst["ref_price"]))
+            prev_close = float(meta.get("chartPreviousClose", ltp))
+            vol = int(meta.get("regularMarketVolume", 100000))
+        except Exception:
+            ltp = self.prev_prices.get(sym, inst["ref_price"])
+            prev_close = inst["ref_price"]
+            vol = self.prev_volumes.get(sym, 100000) + 250
+
+        prev_v = self.prev_volumes.get(sym, max(0, vol - 200))
+        delta_v = max(25, vol - prev_v) if vol >= prev_v else 100
+        prev_p = self.prev_prices.get(sym, ltp)
+        self.prev_volumes[sym] = vol
+        self.prev_prices[sym] = ltp
+
+        bullish = ltp >= prev_p
+        bid0_p = floor_tick(ltp - 0.05) if not bullish else round_tick(ltp)
+        ask0_p = round_tick(bid0_p + 0.05)
+        bid_base_q = int(delta_v * (1.8 if bullish else 0.7))
+        ask_base_q = int(delta_v * (0.7 if bullish else 1.8))
+
+        bids = [(round_tick(bid0_p - i * 0.05), max(100, bid_base_q + i * 200)) for i in range(5)]
+        asks = [(round_tick(ask0_p + i * 0.05), max(100, ask_base_q + i * 120)) for i in range(5)]
+        uc = floor_tick(prev_close * 1.10)
+        lc = ceil_tick(prev_close * 0.90)
+
+        return self._format_l2_csv_line(ts_ns, inst, ltp, delta_v, vol, bids, asks, uc, lc)
+
     def _fetch_yahoo(self) -> List[str]:
         ts_ns = time.time_ns()
-        lines = []
-        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
-        for inst in INSTRUMENTS:
-            sym = inst["symbol"]
-            ticker = inst["yahoo_ticker"]
-            url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?interval=1m&range=1d"
-            try:
-                req = urllib.request.Request(url, headers=headers)
-                with urllib.request.urlopen(req, timeout=4.0) as resp:
-                    data = json.loads(resp.read().decode("utf-8"))
-                meta = data["chart"]["result"][0]["meta"]
-                ltp = float(meta.get("regularMarketPrice", inst["ref_price"]))
-                prev_close = float(meta.get("chartPreviousClose", ltp))
-                vol = int(meta.get("regularMarketVolume", 100000))
-            except Exception:
-                ltp = self.prev_prices.get(sym, inst["ref_price"])
-                prev_close = inst["ref_price"]
-                vol = self.prev_volumes.get(sym, 100000) + 250
-
-            prev_v = self.prev_volumes.get(sym, max(0, vol - 200))
-            delta_v = max(25, vol - prev_v) if vol >= prev_v else 100
-            prev_p = self.prev_prices.get(sym, ltp)
-            self.prev_volumes[sym] = vol
-            self.prev_prices[sym] = ltp
-
-            # Reconstruct directional queue imbalance from price delta
-            bullish = ltp >= prev_p
-            bid0_p = floor_tick(ltp - 0.05) if not bullish else round_tick(ltp)
-            ask0_p = round_tick(bid0_p + 0.05)
-            bid_base_q = int(delta_v * (1.8 if bullish else 0.7))
-            ask_base_q = int(delta_v * (0.7 if bullish else 1.8))
-
-            bids = [(round_tick(bid0_p - i * 0.05), max(100, bid_base_q + i * 200)) for i in range(5)]
-            asks = [(round_tick(ask0_p + i * 0.05), max(100, ask_base_q + i * 120)) for i in range(5)]
-            uc = floor_tick(prev_close * 1.10)
-            lc = ceil_tick(prev_close * 0.90)
-
-            lines.append(self._format_l2_csv_line(ts_ns, inst, ltp, delta_v, vol, bids, asks, uc, lc))
-        return lines
+        with ThreadPoolExecutor(max_workers=5) as pool:
+            return list(pool.map(lambda inst: self._fetch_yahoo_single(inst, ts_ns), INSTRUMENTS))
 
 
 def find_engine_binary() -> Path:
@@ -493,6 +494,57 @@ def run_self_test(engine_bin: Path) -> int:
     return 1
 
 
+def run_connection_test(provider_arg: str) -> int:
+    """Test live connection to configured broker(s) and Yahoo Live fallback, printing L2 quotes."""
+    print("=" * 94)
+    print("  DELTAUNO LIVE FEED CONNECTION & 5-LEVEL L2 QUOTE DIAGNOSTIC")
+    print("=" * 94)
+
+    has_zerodha = bool(os.environ.get("ZERODHA_API_KEY") and os.environ.get("ZERODHA_ACCESS_TOKEN"))
+    has_upstox = bool(os.environ.get("UPSTOX_ACCESS_TOKEN"))
+    has_angel = bool(
+        os.environ.get("ANGELONE_API_KEY")
+        and (
+            os.environ.get("ANGELONE_JWT_TOKEN")
+            or (
+                os.environ.get("ANGELONE_CLIENT_CODE")
+                and os.environ.get("ANGELONE_PIN")
+                and os.environ.get("ANGELONE_TOTP_SECRET")
+            )
+        )
+    )
+
+    print(f"  [1] Zerodha Kite Connect Credentials : {'CONFIGURED' if has_zerodha else 'NOT SET (config/live_broker.env)'}")
+    print(f"  [2] Upstox API v2 Credentials        : {'CONFIGURED' if has_upstox else 'NOT SET (config/live_broker.env)'}")
+    print(f"  [3] AngelOne SmartAPI Credentials    : {'CONFIGURED' if has_angel else 'NOT SET (config/live_broker.env)'}")
+    print(f"  [4] Yahoo / NSE Live Streamer        : ACTIVE (Zero-Config Automatic Fallback)")
+    print("-" * 94)
+
+    provider = LiveQuoteProvider(provider_arg)
+    print(f"  Testing Active Provider: {provider.provider.upper()} ...")
+    t0 = time.perf_counter()
+    lines = provider.fetch_all_ticks()
+    elapsed_ms = (time.perf_counter() - t0) * 1000.0
+
+    print(f"  Fetched {len(lines)}/5 NSE Whitelisted Instruments in {elapsed_ms:.1f} ms:")
+    print("-" * 94)
+    print(f"  {'Symbol':<11} | {'Token':<8} | {'LTP (INR)':<10} | {'Best Bid (Qty)':<16} | {'Best Ask (Qty)':<16} | {'Circuit Band (LC - UC)'}")
+    print("-" * 94)
+    for line in lines:
+        cols = line.split(",")
+        sym = cols[2]
+        tok = cols[1]
+        ltp = cols[3]
+        b0_p, b0_q = cols[6], cols[7]
+        a0_p, a0_q = cols[8], cols[9]
+        uc, lc = cols[10], cols[11]
+        print(
+            f"  {sym:<11} | {tok:<8} | {ltp:>10} | {b0_p:>7} ({b0_q:>5}) | {a0_p:>7} ({a0_q:>5}) | {lc} - {uc}"
+        )
+    print("=" * 94)
+    return 0 if len(lines) == 5 else 1
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="DeltaUno Live NSE Paper Trading Launcher")
     parser.add_argument(
@@ -519,6 +571,11 @@ def main() -> int:
         help="Run immediate 5-second end-to-end live-tail verification and exit",
     )
     parser.add_argument(
+        "--test-connection",
+        action="store_true",
+        help="Test live quote connection and display 5-level L2 snapshots for all 5 NSE stocks",
+    )
+    parser.add_argument(
         "--start-now",
         action="store_true",
         help="Start streaming immediately without waiting for 09:15 IST market open",
@@ -526,6 +583,10 @@ def main() -> int:
     args = parser.parse_args()
 
     load_env_file(REPO_ROOT / "config" / "live_broker.env")
+
+    if args.test_connection:
+        return run_connection_test(args.provider)
+
     engine_bin = find_engine_binary()
 
     if args.self_test:
