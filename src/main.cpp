@@ -227,11 +227,30 @@ int main(int argc, char* argv[]) {
             harv_position.is_breakeven_set = false;
             harv_position.open_time_ns = order.updated_time_ns;
             harv_risk_mgr.set_has_active_position(true);
+            if (live_tail) {
+                std::cout << "[LIVE_EVENT] {\"type\":\"FILL\",\"track\":\"HARVESTER\",\"side\":\"BUY\",\"symbol\":\""
+                          << order.symbol << "\",\"qty\":" << order.filled_quantity
+                          << ",\"price\":" << std::fixed << std::setprecision(2) << core::to_inr(order.avg_fill_price)
+                          << ",\"sl\":" << core::to_inr(harv_position.current_stop_loss)
+                          << ",\"tp\":" << core::to_inr(harv_position.take_profit)
+                          << ",\"balance\":" << harv_broker.cash_balance_inr() << "}\n" << std::flush;
+            }
         } else if (order.side == core::Side::SELL) {
             harv_lifecycle = PositionLifecycle::FLAT;
             harv_pending_signal = core::TradingSignal{};
             harv_risk_mgr.on_trade_closed(audit);
             harv_strat.on_trade_fill(audit);
+            if (live_tail) {
+                const double total_taxes = audit.stt_inr + audit.exchange_fee_inr + audit.gst_inr +
+                                           audit.stamp_duty_inr + audit.sebi_turnover_inr;
+                std::cout << "[LIVE_EVENT] {\"type\":\"FILL\",\"track\":\"HARVESTER\",\"side\":\"SELL\",\"symbol\":\""
+                          << order.symbol << "\",\"qty\":" << audit.quantity
+                          << ",\"price\":" << std::fixed << std::setprecision(2) << core::to_inr(audit.exit_price)
+                          << ",\"gross_pnl\":" << audit.gross_pnl_inr
+                          << ",\"taxes\":" << total_taxes
+                          << ",\"net_pnl\":" << audit.net_pnl_inr
+                          << ",\"balance\":" << harv_broker.cash_balance_inr() << "}\n" << std::flush;
+            }
         }
     });
 
@@ -306,6 +325,16 @@ int main(int argc, char* argv[]) {
                << " | SL=" << core::to_inr(current_position.current_stop_loss)
                << " | TP=" << core::to_inr(current_position.take_profit);
             LOG_TRADE(ss.str());
+            if (live_tail) {
+                const char* trk = primary_is_harvester ? "HARVESTER" : "COMPOUNDER";
+                std::cout << "[LIVE_EVENT] {\"type\":\"FILL\",\"track\":\"" << trk
+                          << "\",\"side\":\"BUY\",\"symbol\":\"" << order.symbol
+                          << "\",\"qty\":" << order.filled_quantity
+                          << ",\"price\":" << std::fixed << std::setprecision(2) << core::to_inr(order.avg_fill_price)
+                          << ",\"sl\":" << core::to_inr(current_position.current_stop_loss)
+                          << ",\"tp\":" << core::to_inr(current_position.take_profit)
+                          << ",\"balance\":" << broker.cash_balance_inr() << "}\n" << std::flush;
+            }
         } else if (order.side == core::Side::SELL) {
             lifecycle = PositionLifecycle::FLAT;
             pending_entry_signal = core::TradingSignal{};
@@ -327,6 +356,17 @@ int main(int argc, char* argv[]) {
                << " | MFE: " << core::to_inr(audit.max_favorable_excursion) << " INR"
                << " | Balance: " << broker.cash_balance_inr() << " INR";
             LOG_TRADE(ss.str());
+            if (live_tail) {
+                const char* trk = primary_is_harvester ? "HARVESTER" : "COMPOUNDER";
+                std::cout << "[LIVE_EVENT] {\"type\":\"FILL\",\"track\":\"" << trk
+                          << "\",\"side\":\"SELL\",\"symbol\":\"" << order.symbol
+                          << "\",\"qty\":" << audit.quantity
+                          << ",\"price\":" << std::fixed << std::setprecision(2) << core::to_inr(audit.exit_price)
+                          << ",\"gross_pnl\":" << audit.gross_pnl_inr
+                          << ",\"taxes\":" << total_taxes
+                          << ",\"net_pnl\":" << audit.net_pnl_inr
+                          << ",\"balance\":" << broker.cash_balance_inr() << "}\n" << std::flush;
+            }
         }
     });
 

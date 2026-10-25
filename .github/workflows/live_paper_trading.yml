@@ -1,0 +1,120 @@
+name: DeltaUno Live NSE Paper Trading (Dual-Mode)
+
+on:
+  # Automatically launches every NSE weekday (Mon-Fri) at 03:42 UTC (09:12 IST)
+  schedule:
+    - cron: "42 3 * * 1-5"
+
+  # Allows instant manual test or custom session trigger from GitHub Actions UI
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Strategy Execution Mode (both, compounder, harvester)"
+        required: false
+        default: "both"
+        type: choice
+        options:
+          - both
+          - compounder
+          - harvester
+      provider:
+        description: "Live Market Feed Provider (auto, angelone, zerodha, upstox, yahoo)"
+        required: false
+        default: "auto"
+        type: choice
+        options:
+          - auto
+          - angelone
+          - zerodha
+          - upstox
+          - yahoo
+      start_now:
+        description: "Start streaming immediately without waiting for 09:15 IST?"
+        required: false
+        default: true
+        type: boolean
+      max_runtime_minutes:
+        description: "Max runtime in minutes before graceful EOD report (e.g. 2 for quick test, 350 for full day)"
+        required: false
+        default: "2"
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  live-paper-trading:
+    name: Dual-Mode Live Paper Trading (Track A + Track B)
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    env:
+      TZ: Asia/Kolkata
+      ANGELONE_API_KEY: ${{ secrets.ANGELONE_API_KEY }}
+      ANGELONE_CLIENT_CODE: ${{ secrets.ANGELONE_CLIENT_CODE }}
+      ANGELONE_PIN: ${{ secrets.ANGELONE_PIN }}
+      ANGELONE_TOTP_SECRET: ${{ secrets.ANGELONE_TOTP_SECRET }}
+      ANGELONE_PUBLIC_IP: ${{ secrets.ANGELONE_PUBLIC_IP }}
+      ZERODHA_API_KEY: ${{ secrets.ZERODHA_API_KEY }}
+      ZERODHA_ACCESS_TOKEN: ${{ secrets.ZERODHA_ACCESS_TOKEN }}
+      UPSTOX_ACCESS_TOKEN: ${{ secrets.UPSTOX_ACCESS_TOKEN }}
+      GOOGLE_SHEETS_WEBHOOK_URL: ${{ secrets.GOOGLE_SHEETS_WEBHOOK_URL }}
+
+    steps:
+      - name: Checkout DeltaUno Repository
+        uses: actions/checkout@v4
+
+      - name: Build C++20 Engine (Release) & Run CTest Verification
+        run: |
+          cmake -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build -j $(nproc)
+          ctest --test-dir build --output-on-failure
+
+      - name: Run Live Feed Connection & Self-Test Diagnostic
+        run: |
+          python3 scripts/run_live_paper_trading.py --self-test
+          python3 scripts/run_live_paper_trading.py --test-connection
+
+      - name: Execute Live NSE Paper Trading Session & Sync to Google Sheets
+        id: live_session
+        run: |
+          MODE="${{ github.event.inputs.mode || 'both' }}"
+          PROVIDER="${{ github.event.inputs.provider || 'auto' }}"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            MAX_MIN="${{ github.event.inputs.max_runtime_minutes || '2' }}"
+            if [ "${{ github.event.inputs.start_now }}" = "true" ]; then
+              START_FLAG="--start-now"
+            else
+              START_FLAG=""
+            fi
+          else
+            MAX_MIN="350"
+            START_FLAG=""
+          fi
+
+          python3 scripts/run_live_paper_trading.py \
+            --mode "$MODE" \
+            --provider "$PROVIDER" \
+            --max-runtime-minutes "$MAX_MIN" \
+            $START_FLAG | tee live_session_output.log
+
+      - name: Publish Dual-Mode Executive Summary to GitHub Job Summary
+        if: always()
+        run: |
+          echo "## 📈 DeltaUno Live NSE Paper Trading Session Summary" >> $GITHUB_STEP_SUMMARY
+          echo "- **IST Timestamp**: \`$(date '+%Y-%m-%d %H:%M:%S %Z')\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`text" >> $GITHUB_STEP_SUMMARY
+          tail -n 65 live_session_output.log >> $GITHUB_STEP_SUMMARY || true
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+
+      - name: Upload Live Tick Journal & Engine Audit Logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: deltauno-live-session-${{ github.run_id }}
+          path: |
+            data/live_ticks_*.csv
+            deltauno.log
+            live_session_output.log
+          if-no-files-found: ignore
+          retention-days: 30

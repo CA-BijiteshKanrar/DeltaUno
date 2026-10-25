@@ -31,13 +31,14 @@ import signal
 import struct
 import subprocess
 import sys
+import threading
 import time
 import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 IST_OFFSET = timedelta(hours=5, minutes=30)
@@ -187,7 +188,7 @@ class LiveQuoteProvider:
             "X-UserType": "USER",
             "X-SourceID": "WEB",
             "X-ClientLocalIP": "127.0.0.1",
-            "X-ClientPublicIP": "127.0.0.1",
+            "X-ClientPublicIP": os.environ.get("ANGELONE_PUBLIC_IP", "127.0.0.1"),
             "X-MacAddress": "00:00:00:00:00:00",
             "X-PrivateKey": api_key,
         }
@@ -345,7 +346,7 @@ class LiveQuoteProvider:
             "X-UserType": "USER",
             "X-SourceID": "WEB",
             "X-ClientLocalIP": "127.0.0.1",
-            "X-ClientPublicIP": "127.0.0.1",
+            "X-ClientPublicIP": os.environ.get("ANGELONE_PUBLIC_IP", "127.0.0.1"),
             "X-MacAddress": "00:00:00:00:00:00",
             "X-PrivateKey": api_key,
         }
@@ -545,6 +546,200 @@ def run_connection_test(provider_arg: str) -> int:
     return 0 if len(lines) == 5 else 1
 
 
+class GoogleSheetsLiveSync:
+    """Streams real-time Dual-Mode trades, 60s heartbeats, and EOD summary to Google Sheets."""
+
+    def __init__(self, webhook_url: str, provider_name: str, mode: str):
+        self.webhook_url = webhook_url.strip()
+        self.provider_name = provider_name.upper()
+        self.mode = mode.upper()
+        self.source = "GITHUB_ACTIONS" if os.environ.get("GITHUB_ACTIONS") == "true" else "LOCAL"
+        self.lock = threading.Lock()
+        self.ticks_streamed = 0
+        self.latest_quotes: List[Dict[str, Any]] = []
+
+        self.tracks: Dict[str, Dict[str, Any]] = {
+            "COMPOUNDER": {"equity": 10000.0, "pnl": 0.0, "trades": 0, "wins": 0, "open_pos": "FLAT"},
+            "HARVESTER": {"equity": 10000.0, "pnl": 0.0, "trades": 0, "wins": 0, "open_pos": "FLAT"},
+        }
+
+    @property
+    def enabled(self) -> bool:
+        return bool(self.webhook_url and self.webhook_url.startswith("https://"))
+
+    def update_quotes(self, csv_lines: List[str], add_ticks: int = 0) -> None:
+        parsed = []
+        for line in csv_lines:
+            cols = line.split(",")
+            if len(cols) < 12:
+                continue
+            parsed.append(
+                {
+                    "symbol": cols[2],
+                    "token": cols[1],
+                    "ltp": float(cols[3]),
+                    "bid_str": f"{cols[6]} ({cols[7]})",
+                    "ask_str": f"{cols[8]} ({cols[9]})",
+                    "circuit_str": f"{cols[11]} - {cols[10]}",
+                }
+            )
+        with self.lock:
+            self.ticks_streamed += add_ticks
+            if parsed:
+                self.latest_quotes = parsed
+
+    def _build_dashboard_dict(self, status: str = "LIVE_RUNNING") -> Dict[str, Any]:
+        now_str = datetime.now(TZ_IST).strftime("%Y-%m-%d %H:%M:%S IST")
+        c = self.tracks["COMPOUNDER"]
+        h = self.tracks["HARVESTER"]
+        return {
+            "timestamp_ist": now_str,
+            "source": self.source,
+            "provider": self.provider_name,
+            "status": status,
+            "ticks": self.ticks_streamed,
+            "mode": self.mode,
+            "comp_equity": round(c["equity"], 2),
+            "comp_pnl": round(c["pnl"], 2),
+            "comp_ret_pct": f"{(c['pnl'] / 10000.0) * 100.0:+.2f}%",
+            "comp_trades": f"{c['wins']}W / {c['trades']}T",
+            "comp_open_pos": c["open_pos"],
+            "harv_equity": round(h["equity"], 2),
+            "harv_pnl": round(h["pnl"], 2),
+            "harv_ret_pct": f"{(h['pnl'] / 10000.0) * 100.0:+.2f}%",
+            "harv_trades": f"{h['wins']}W / {h['trades']}T",
+            "harv_open_pos": h["open_pos"],
+            "quotes": list(self.latest_quotes),
+        }
+
+    def _post_json(self, payload: Dict[str, Any]) -> bool:
+        if not self.enabled:
+            return False
+        try:
+            body = json.dumps(payload).encode("utf-8")
+            req = urllib.request.Request(
+                self.webhook_url,
+                data=body,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=8.0) as resp:
+                _ = resp.read()
+            return True
+        except Exception as e:
+            print(f"[WARN] Google Sheets sync warning: {e}", flush=True)
+            return False
+
+    def on_engine_live_event(self, ev: Dict[str, Any]) -> None:
+        if ev.get("type") != "FILL":
+            return
+        trk_name = ev.get("track", "COMPOUNDER")
+        side = ev.get("side", "")
+        sym = ev.get("symbol", "")
+        qty = int(ev.get("qty", 0))
+        price = float(ev.get("price", 0.0))
+        now_str = datetime.now(TZ_IST).strftime("%Y-%m-%d %H:%M:%S IST")
+
+        with self.lock:
+            trk = self.tracks.get(trk_name, self.tracks["COMPOUNDER"])
+            if side == "BUY":
+                sl = ev.get("sl", 0.0)
+                tp = ev.get("tp", 0.0)
+                trk["open_pos"] = f"LONG {sym} x{qty} @ {price:.2f} (SL {sl:.2f} / TP {tp:.2f})"
+            elif side == "SELL":
+                net_pnl = float(ev.get("net_pnl", 0.0))
+                trk["pnl"] += net_pnl
+                trk["equity"] = float(ev.get("balance", 10000.0 + trk["pnl"]))
+                trk["trades"] += 1
+                if net_pnl > 0:
+                    trk["wins"] += 1
+                trk["open_pos"] = "FLAT"
+            dash = self._build_dashboard_dict("LIVE_RUNNING")
+
+        payload = {
+            "event": "TRADE_FILL",
+            "timestamp_ist": now_str,
+            "source": self.source,
+            "track": trk_name,
+            "side": side,
+            "symbol": sym,
+            "qty": qty,
+            "price": price,
+            "sl": ev.get("sl", ""),
+            "tp": ev.get("tp", ""),
+            "gross_pnl": ev.get("gross_pnl", ""),
+            "taxes": ev.get("taxes", ""),
+            "net_pnl": ev.get("net_pnl", ""),
+            "balance": ev.get("balance", ""),
+            "dashboard": dash,
+        }
+        threading.Thread(target=self._post_json, args=(payload,), daemon=True).start()
+
+    def push_heartbeat(self, status: str = "LIVE_RUNNING") -> bool:
+        if not self.enabled:
+            return False
+        with self.lock:
+            dash = self._build_dashboard_dict(status)
+        return self._post_json({"event": "HEARTBEAT", "dashboard": dash})
+
+    def push_daily_summary(self) -> bool:
+        if not self.enabled:
+            return False
+        with self.lock:
+            c = self.tracks["COMPOUNDER"]
+            h = self.tracks["HARVESTER"]
+            c_wr = (c["wins"] / c["trades"] * 100.0) if c["trades"] > 0 else 0.0
+            h_wr = (h["wins"] / h["trades"] * 100.0) if h["trades"] > 0 else 0.0
+            dash = self._build_dashboard_dict("SESSION_COMPLETED")
+            summary = {
+                "date_ist": datetime.now(TZ_IST).strftime("%Y-%m-%d"),
+                "source": self.source,
+                "provider": self.provider_name,
+                "ticks": self.ticks_streamed,
+                "comp_equity": round(c["equity"], 2),
+                "comp_pnl": round(c["pnl"], 2),
+                "comp_ret_pct": round((c["pnl"] / 10000.0) * 100.0, 2),
+                "comp_trades": c["trades"],
+                "comp_win_rate": round(c_wr, 2),
+                "harv_equity": round(h["equity"], 2),
+                "harv_pnl": round(h["pnl"], 2),
+                "harv_ret_pct": round((h["pnl"] / 10000.0) * 100.0, 2),
+                "harv_trades": h["trades"],
+                "harv_win_rate": round(h_wr, 2),
+            }
+        return self._post_json({"event": "DAILY_SUMMARY", "dashboard": dash, "summary": summary})
+
+
+def run_sheets_test(provider_arg: str) -> int:
+    """Verify Google Sheets webhook integration using live NSE quotes from active provider."""
+    webhook_url = os.environ.get("GOOGLE_SHEETS_WEBHOOK_URL", "").strip()
+    print("=" * 94)
+    print("  DELTAUNO LIVE GOOGLE SHEETS WEBHOOK DIAGNOSTIC")
+    print("=" * 94)
+    if not webhook_url:
+        print("  [STATUS] GOOGLE_SHEETS_WEBHOOK_URL is not configured yet in config/live_broker.env.")
+        print("  To enable Live Google Sheets streaming:")
+        print("    1. Open https://sheets.new -> Extensions -> Apps Script")
+        print("    2. Paste scripts/google_sheets_live_bridge.gs -> Deploy -> New deployment -> Web app")
+        print("    3. Set GOOGLE_SHEETS_WEBHOOK_URL=<your_web_app_url> in config/live_broker.env")
+        print("=" * 94)
+        return 1
+
+    provider = LiveQuoteProvider(provider_arg)
+    lines = provider.fetch_all_ticks()
+    sync = GoogleSheetsLiveSync(webhook_url, provider.provider, "both")
+    sync.update_quotes(lines, add_ticks=len(lines))
+    print(f"  Pushing live 5-instrument L2 snapshot ({provider.provider.upper()}) to Google Sheets...")
+    ok = sync.push_heartbeat(status="CONNECTION_VERIFIED")
+    if ok:
+        print("  [PASS] Live_Dashboard, Live_Trades, and Daily_Summary tabs updated in Google Sheets!")
+        print("=" * 94)
+        return 0
+    print("  [FAIL] Could not reach GOOGLE_SHEETS_WEBHOOK_URL.")
+    print("=" * 94)
+    return 1
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="DeltaUno Live NSE Paper Trading Launcher")
     parser.add_argument(
@@ -566,6 +761,12 @@ def main() -> int:
         help="Polling interval in seconds for REST quote providers (default: 1.0s)",
     )
     parser.add_argument(
+        "--max-runtime-minutes",
+        type=float,
+        default=0.0,
+        help="Optional max runtime in minutes before graceful EOD square-off (0 = run until 15:30 IST)",
+    )
+    parser.add_argument(
         "--self-test",
         action="store_true",
         help="Run immediate 5-second end-to-end live-tail verification and exit",
@@ -574,6 +775,11 @@ def main() -> int:
         "--test-connection",
         action="store_true",
         help="Test live quote connection and display 5-level L2 snapshots for all 5 NSE stocks",
+    )
+    parser.add_argument(
+        "--test-sheets",
+        action="store_true",
+        help="Test Live Google Sheets webhook sync with real NSE L2 quotes",
     )
     parser.add_argument(
         "--start-now",
@@ -587,12 +793,18 @@ def main() -> int:
     if args.test_connection:
         return run_connection_test(args.provider)
 
+    if args.test_sheets:
+        return run_sheets_test(args.provider)
+
     engine_bin = find_engine_binary()
 
     if args.self_test:
         return run_self_test(engine_bin)
 
     provider = LiveQuoteProvider(args.provider)
+    sheets_url = os.environ.get("GOOGLE_SHEETS_WEBHOOK_URL", "")
+    sheets_sync = GoogleSheetsLiveSync(sheets_url, provider.provider, args.mode)
+
     now_ist = datetime.now(TZ_IST)
     date_tag = now_ist.strftime("%Y%m%d")
     live_csv = REPO_ROOT / "data" / f"live_ticks_{date_tag}.csv"
@@ -603,6 +815,7 @@ def main() -> int:
     print(f"  Current IST Time  : {now_ist.strftime('%Y-%m-%d %H:%M:%S IST')}")
     print(f"  Selected Provider : {provider.provider.upper()}")
     print(f"  Strategy Mode     : {args.mode.upper()} (Track A: Compounder + Track B: Harvester)")
+    print(f"  Google Sheets Sync: {'ACTIVE (Real-Time Webhook)' if sheets_sync.enabled else 'DISABLED (Set GOOGLE_SHEETS_WEBHOOK_URL)'}")
     print(f"  Live Tick Journal : {live_csv}")
     print("=" * 88)
 
@@ -628,7 +841,32 @@ def main() -> int:
         print("\n[MARKET OPEN] 09:15:00 IST reached! Launching C++20 Engine...")
 
     cmd = [str(engine_bin), "--mode", args.mode, "--live-tail", "--csv", str(live_csv)]
-    proc = subprocess.Popen(cmd, cwd=REPO_ROOT)
+    proc = subprocess.Popen(
+        cmd,
+        cwd=REPO_ROOT,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        bufsize=1,
+    )
+
+    def stdout_reader():
+        assert proc.stdout is not None
+        for raw_line in proc.stdout:
+            line = raw_line.rstrip("\r\n")
+            if line.startswith("[LIVE_EVENT] "):
+                try:
+                    ev = json.loads(line[len("[LIVE_EVENT] ") :])
+                    sheets_sync.on_engine_live_event(ev)
+                except Exception:
+                    pass
+            else:
+                print(line, flush=True)
+
+    reader_thread = threading.Thread(target=stdout_reader, daemon=True)
+    reader_thread.start()
 
     stop_requested = False
 
@@ -638,25 +876,43 @@ def main() -> int:
 
     signal.signal(signal.SIGINT, sigint_handler)
 
+    start_monotonic = time.monotonic()
+    last_heartbeat = 0.0
+
     try:
         with open(live_csv, "a", encoding="utf-8", newline="\n") as f:
             while not stop_requested and proc.poll() is None:
                 now_ist = datetime.now(TZ_IST)
                 # Automatically end session at 15:30:05 IST
                 if not args.start_now and (now_ist.hour > 15 or (now_ist.hour == 15 and now_ist.minute >= 30)):
-                    print("\n[MARKET CLOSE] 15:30 IST reached. Closing live session cleanly...")
+                    print("\n[MARKET CLOSE] 15:30 IST reached. Closing live session cleanly...", flush=True)
                     break
+
+                if args.max_runtime_minutes > 0:
+                    elapsed_min = (time.monotonic() - start_monotonic) / 60.0
+                    if elapsed_min >= args.max_runtime_minutes:
+                        print(f"\n[MAX RUNTIME] {args.max_runtime_minutes:.1f} min reached. Closing session cleanly...", flush=True)
+                        break
 
                 tick_lines = provider.fetch_all_ticks()
                 for line in tick_lines:
                     f.write(line + "\n")
                 f.flush()
+
+                sheets_sync.update_quotes(tick_lines, add_ticks=len(tick_lines))
+                if sheets_sync.enabled and (time.monotonic() - last_heartbeat >= 60.0):
+                    last_heartbeat = time.monotonic()
+                    threading.Thread(target=sheets_sync.push_heartbeat, daemon=True).start()
+
                 time.sleep(args.poll_interval)
     finally:
         with open(live_csv, "a", encoding="utf-8", newline="\n") as f:
             f.write("#SESSION_END\n")
             f.flush()
         proc.wait(timeout=15.0)
+        reader_thread.join(timeout=3.0)
+        if sheets_sync.enabled:
+            sheets_sync.push_daily_summary()
 
     return proc.returncode or 0
 
