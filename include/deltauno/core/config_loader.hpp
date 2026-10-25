@@ -22,6 +22,14 @@ struct RiskConfig {
     double breakeven_trigger_pct{1.0};
     double min_payoff_to_fee_ratio{2.5};
 
+    // Strategy parameters for dual-mode optimization (Compounder vs Harvester)
+    double take_profit_pct{1.75};
+    double stop_loss_pct{0.85};
+    double min_composite_ofi{0.55};
+    double min_bid_depth_ratio{1.25};
+    bool disable_afternoon_entries{false};
+    bool enable_ofi_harvest{false};
+
     // Seconds from midnight IST
     int morning_start_sec{9 * 3600 + 30 * 60};     // 09:30:00
     int morning_end_sec{11 * 3600};                // 11:00:00
@@ -149,6 +157,25 @@ public:
         if (auto v = extract_number(content, "max_15s_volume_burst_multiple")) cfg.max_15s_volume_burst_multiple = *v;
         if (auto v = extract_number(content, "heartbeat_timeout_seconds")) {
             cfg.heartbeat_timeout_seconds = static_cast<uint32_t>(*v);
+        }
+
+        if (auto v = extract_number(content, "take_profit_pct")) cfg.take_profit_pct = *v;
+        if (auto v = extract_number(content, "stop_loss_pct")) cfg.stop_loss_pct = *v;
+        if (auto v = extract_number(content, "min_composite_ofi")) cfg.min_composite_ofi = *v;
+        if (auto v = extract_number(content, "min_bid_depth_ratio")) cfg.min_bid_depth_ratio = *v;
+        if (content.find("\"disable_afternoon_entries\": true") != std::string::npos ||
+            content.find("\"disable_afternoon_entries\":true") != std::string::npos) {
+            cfg.disable_afternoon_entries = true;
+        } else if (content.find("\"disable_afternoon_entries\": false") != std::string::npos ||
+                   content.find("\"disable_afternoon_entries\":false") != std::string::npos) {
+            cfg.disable_afternoon_entries = false;
+        }
+        if (content.find("\"enable_ofi_harvest\": true") != std::string::npos ||
+            content.find("\"enable_ofi_harvest\":true") != std::string::npos) {
+            cfg.enable_ofi_harvest = true;
+        } else if (content.find("\"enable_ofi_harvest\": false") != std::string::npos ||
+                   content.find("\"enable_ofi_harvest\":false") != std::string::npos) {
+            cfg.enable_ofi_harvest = false;
         }
 
         return cfg;

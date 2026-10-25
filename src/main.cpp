@@ -38,6 +38,7 @@ int main(int argc, char* argv[]) {
     std::string csv_path = "data/sample_nse_ticks.csv";
     std::string config_dir = "config";
     std::string cli_webhook_json;
+    std::string run_mode = "both"; // "both" (default), "compounder", or "harvester"
     bool realtime_pacing = false;
     bool verbose_logs = false;
 
@@ -49,6 +50,8 @@ int main(int argc, char* argv[]) {
             config_dir = argv[++i];
         } else if (arg == "--webhook" && i + 1 < argc) {
             cli_webhook_json = argv[++i];
+        } else if (arg == "--mode" && i + 1 < argc) {
+            run_mode = argv[++i];
         } else if (arg == "--realtime") {
             realtime_pacing = true;
         } else if (arg == "--verbose") {
@@ -87,8 +90,7 @@ int main(int argc, char* argv[]) {
         symbol_to_token.emplace(inst.symbol, inst.token);
     }
 
-    // 3. Initialize Risk Manager, Execution Gateway, Watchdog & WAL State Journal
-    risk::RiskManager risk_mgr(risk_cfg);
+    // 3. Initialize Execution Gateway, Watchdog & WAL State Journal
     execution::PaperBroker broker(risk_cfg.initial_capital_inr);
     execution::TradeAuditor trade_auditor(risk_cfg.initial_capital_inr);
     market::Watchdog watchdog(risk_cfg.heartbeat_timeout_seconds);
@@ -118,7 +120,6 @@ int main(int argc, char* argv[]) {
     if (recovered_pos.has_value()) {
         current_position = *recovered_pos;
         lifecycle = PositionLifecycle::OPEN;
-        risk_mgr.set_has_active_position(true);
         broker.restore_open_position(current_position);
         watchdog.set_has_open_position(true);
 
@@ -135,10 +136,114 @@ int main(int argc, char* argv[]) {
     }
 
     // 5. Initialize Strategy Pipeline & "BS Detector" Signal Ingestor
+    const bool primary_is_harvester = (run_mode == "harvester");
+    const bool enable_parallel_harvester = (run_mode == "both");
+
+    core::RiskConfig primary_risk_cfg = risk_cfg;
+    if (primary_is_harvester) {
+        primary_risk_cfg.max_position_value_inr = 5000.0;
+        primary_risk_cfg.breakeven_trigger_pct = 1.0;
+        primary_risk_cfg.afternoon_end_sec = 14 * 3600 + 45 * 60;
+        primary_risk_cfg.enable_ofi_harvest = true;
+    }
+    risk::RiskManager active_risk_mgr(primary_risk_cfg);
+    if (recovered_pos.has_value()) {
+        active_risk_mgr.set_has_active_position(true);
+    }
+
     strategy::MomentumBreakoutStrategy momentum_strat(
-        2.5, 0.55, whitelist, 5, risk_cfg.circuit_limit_buffer_pct);
+        2.5,
+        primary_is_harvester ? 0.55 : risk_cfg.min_composite_ofi,
+        whitelist,
+        5,
+        risk_cfg.circuit_limit_buffer_pct,
+        risk_cfg.take_profit_pct,
+        risk_cfg.stop_loss_pct,
+        risk_cfg.min_bid_depth_ratio,
+        primary_is_harvester ? strategy::StrategyMode::HARVESTER : strategy::StrategyMode::COMPOUNDER);
     strategy::SignalIngestor bs_detector(
         whitelist, 2.0, risk_cfg.max_15s_volume_burst_multiple, 0.20, risk_cfg.circuit_limit_buffer_pct, 5);
+
+    // 5b. Initialize Parallel Track B (L2 Microstructure Harvester) when running in Dual-Mode ("both")
+    core::RiskConfig harv_cfg = risk_cfg;
+    harv_cfg.max_position_value_inr = 5000.0;
+    harv_cfg.breakeven_trigger_pct = 1.0;
+    harv_cfg.afternoon_end_sec = 14 * 3600 + 45 * 60;
+    harv_cfg.enable_ofi_harvest = true;
+
+    risk::RiskManager harv_risk_mgr(harv_cfg);
+    execution::PaperBroker harv_broker(risk_cfg.initial_capital_inr);
+    execution::TradeAuditor harv_auditor(risk_cfg.initial_capital_inr);
+    strategy::MomentumBreakoutStrategy harv_strat(
+        2.5, 0.55, whitelist, 5, risk_cfg.circuit_limit_buffer_pct,
+        1.80, 1.00, 1.25, strategy::StrategyMode::HARVESTER);
+    core::Position harv_position{};
+    core::TradingSignal harv_pending_signal{};
+    PositionLifecycle harv_lifecycle = PositionLifecycle::FLAT;
+    uint64_t harv_next_order_id = 1000001;
+
+    harv_broker.register_fill_callback([&](const core::Order& order, const core::TradeAuditEntry& audit) {
+        const core::Price tick_step = tick_sizes_paise.count(order.token) ? tick_sizes_paise[order.token] : 5;
+        if (order.side == core::Side::BUY) {
+            harv_lifecycle = PositionLifecycle::OPEN;
+            harv_position = core::Position{};
+            harv_position.token = order.token;
+            core::copy_fixed_str(harv_position.symbol, order.symbol);
+            harv_position.side = core::Side::BUY;
+            harv_position.quantity = order.filled_quantity;
+            harv_position.avg_entry_price = order.avg_fill_price;
+            harv_position.current_price = order.avg_fill_price;
+            harv_position.peak_favorable_price = order.avg_fill_price;
+            harv_position.worst_adverse_price = order.avg_fill_price;
+            if (harv_pending_signal.is_valid && harv_pending_signal.target_entry > 0) {
+                const core::Price sl_dist = harv_pending_signal.target_entry - harv_pending_signal.stop_loss;
+                const core::Price tp_dist = harv_pending_signal.take_profit - harv_pending_signal.target_entry;
+                harv_position.current_stop_loss = core::floor_to_tick(order.avg_fill_price - sl_dist, tick_step);
+                harv_position.take_profit = core::ceil_to_tick(order.avg_fill_price + tp_dist, tick_step);
+            } else {
+                harv_position.current_stop_loss = core::floor_to_tick(
+                    static_cast<core::Price>(static_cast<double>(order.avg_fill_price) * 0.990), tick_step);
+                harv_position.take_profit = core::ceil_to_tick(
+                    static_cast<core::Price>(static_cast<double>(order.avg_fill_price) * 1.018), tick_step);
+            }
+            harv_position.initial_stop_loss = harv_position.current_stop_loss;
+            harv_position.is_breakeven_set = false;
+            harv_position.open_time_ns = order.updated_time_ns;
+            harv_risk_mgr.set_has_active_position(true);
+        } else if (order.side == core::Side::SELL) {
+            harv_lifecycle = PositionLifecycle::FLAT;
+            harv_pending_signal = core::TradingSignal{};
+            harv_risk_mgr.on_trade_closed(audit);
+            harv_strat.on_trade_fill(audit);
+        }
+    });
+
+    auto try_submit_harv_signal = [&](const core::TradingSignal& sig,
+                                      const market::OrderBook& book,
+                                      uint64_t current_time_ns) {
+        if (harv_lifecycle != PositionLifecycle::FLAT) return;
+        const bool macro_frozen = macro_calendar.is_frozen(current_time_ns);
+        const bool near_circuit = book.is_near_circuit(harv_cfg.circuit_limit_buffer_pct);
+        const auto [sized_qty, rejection] =
+            harv_risk_mgr.evaluate_and_size_order(sig, current_time_ns, macro_frozen, near_circuit);
+        if (rejection != risk::RiskRejection::NONE) return;
+
+        core::Order new_order{};
+        new_order.client_order_id = harv_next_order_id++;
+        new_order.token = sig.token;
+        core::copy_fixed_str(new_order.symbol, sig.symbol);
+        new_order.side = sig.side;
+        new_order.type = core::OrderType::MARKET;
+        new_order.price = sig.target_entry;
+        new_order.quantity = sized_qty;
+        new_order.created_time_ns = current_time_ns;
+
+        if (harv_broker.place_order(new_order)) {
+            harv_lifecycle = PositionLifecycle::PENDING_ENTRY;
+            harv_pending_signal = sig;
+            harv_risk_mgr.set_has_active_position(true);
+        }
+    };
 
     // 6. Register Execution Gateway Fill Callback
     broker.register_fill_callback([&](const core::Order& order, const core::TradeAuditEntry& audit) {
@@ -174,7 +279,7 @@ int main(int argc, char* argv[]) {
             current_position.is_breakeven_set = false;
             current_position.open_time_ns = order.updated_time_ns;
 
-            risk_mgr.set_has_active_position(true);
+            active_risk_mgr.set_has_active_position(true);
             watchdog.set_has_open_position(true);
             journal.save_position(current_position);
 
@@ -187,7 +292,7 @@ int main(int argc, char* argv[]) {
         } else if (order.side == core::Side::SELL) {
             lifecycle = PositionLifecycle::FLAT;
             pending_entry_signal = core::TradingSignal{};
-            risk_mgr.on_trade_closed(audit);
+            active_risk_mgr.on_trade_closed(audit);
             momentum_strat.on_trade_fill(audit);
             watchdog.set_has_open_position(false);
             journal.clear_position();
@@ -218,7 +323,7 @@ int main(int argc, char* argv[]) {
         const bool near_circuit = book.is_near_circuit(risk_cfg.circuit_limit_buffer_pct);
 
         const auto [sized_qty, rejection] =
-            risk_mgr.evaluate_and_size_order(sig, current_time_ns, macro_frozen, near_circuit);
+            active_risk_mgr.evaluate_and_size_order(sig, current_time_ns, macro_frozen, near_circuit);
         if (rejection != risk::RiskRejection::NONE) {
             LOG_DEBUG(std::string("Order rejected by RiskManager: ") + risk::risk_rejection_to_string(rejection));
             return;
@@ -237,7 +342,7 @@ int main(int argc, char* argv[]) {
         if (broker.place_order(new_order)) {
             lifecycle = PositionLifecycle::PENDING_ENTRY;
             pending_entry_signal = sig;
-            risk_mgr.set_has_active_position(true);
+            active_risk_mgr.set_has_active_position(true);
 
             std::ostringstream ss;
             ss << "SIGNAL ACCEPTED ("
@@ -321,16 +426,28 @@ int main(int argc, char* argv[]) {
                     }
 
                     // 2. Coordinated Rollover Dispatch
-                    risk_mgr.check_day_rollover(tick.timestamp_ns);
+                    active_risk_mgr.check_day_rollover(tick.timestamp_ns);
                     trade_auditor.on_session_start(tick_ist_day, execution::TradeAuditor::format_ist_date(tick.timestamp_ns));
                     momentum_strat.reset_daily_session();
+                    if (enable_parallel_harvester) {
+                        harv_lifecycle = PositionLifecycle::FLAT;
+                        harv_position = core::Position{};
+                        harv_pending_signal = core::TradingSignal{};
+                        harv_risk_mgr.check_day_rollover(tick.timestamp_ns);
+                        harv_auditor.on_session_start(tick_ist_day, execution::TradeAuditor::format_ist_date(tick.timestamp_ns));
+                        harv_strat.reset_daily_session();
+                    }
                     for (auto& [tok, book_inst] : books) {
                         book_inst.reset_daily_session();
                     }
                     watchdog.set_has_open_position(false);
                 } else if (current_ist_day == -1) {
-                    risk_mgr.check_day_rollover(tick.timestamp_ns);
+                    active_risk_mgr.check_day_rollover(tick.timestamp_ns);
                     trade_auditor.on_session_start(tick_ist_day, execution::TradeAuditor::format_ist_date(tick.timestamp_ns));
+                    if (enable_parallel_harvester) {
+                        harv_risk_mgr.check_day_rollover(tick.timestamp_ns);
+                        harv_auditor.on_session_start(tick_ist_day, execution::TradeAuditor::format_ist_date(tick.timestamp_ns));
+                    }
                 }
                 current_ist_day = tick_ist_day;
             }
@@ -346,9 +463,15 @@ int main(int argc, char* argv[]) {
 
             // B. Match pending orders strictly on Tick[t+1] (Zero Look-Ahead Bias)
             broker.on_next_tick(tick, book);
+            if (enable_parallel_harvester) {
+                harv_broker.on_next_tick(tick, book);
+            }
 
             // C. Always advance strategy rolling volume & VWAP state (even while holding a position!)
             momentum_strat.on_tick(tick, book);
+            if (enable_parallel_harvester) {
+                harv_strat.on_tick(tick, book);
+            }
 
             // D. Drain any queued external trader webhook alerts once local order book is live
             while (auto alert_opt = alert_ring->pop()) {
@@ -366,6 +489,36 @@ int main(int argc, char* argv[]) {
                              strategy::veto_reason_to_string(veto));
                 } else {
                     try_submit_signal(*ext_sig, b_it->second, tick.timestamp_ns);
+                    if (enable_parallel_harvester) {
+                        try_submit_harv_signal(*ext_sig, b_it->second, tick.timestamp_ns);
+                    }
+                }
+            }
+
+            // D2. Manage Parallel Track B (Harvester) Open Position & Signal Generation
+            if (enable_parallel_harvester) {
+                if (harv_lifecycle == PositionLifecycle::OPEN && tick.token == harv_position.token) {
+                    const core::Price tick_step = tick_sizes_paise.count(tick.token) ? tick_sizes_paise[tick.token] : 5;
+                    const auto [h_should_exit, h_exit_reason] =
+                        harv_risk_mgr.check_position_rules(harv_position, tick.last_price, tick.timestamp_ns, tick_step, &book);
+                    if (h_should_exit) {
+                        core::Order exit_order{};
+                        exit_order.client_order_id = harv_next_order_id++;
+                        exit_order.token = harv_position.token;
+                        core::copy_fixed_str(exit_order.symbol, harv_position.symbol);
+                        exit_order.side = core::Side::SELL;
+                        exit_order.type = core::OrderType::MARKET;
+                        exit_order.quantity = harv_position.quantity;
+                        exit_order.created_time_ns = tick.timestamp_ns;
+                        if (harv_broker.place_order(exit_order)) {
+                            harv_lifecycle = PositionLifecycle::PENDING_EXIT;
+                        }
+                    }
+                } else if (harv_lifecycle == PositionLifecycle::FLAT) {
+                    if (const auto h_sig = harv_strat.generate_signal(book);
+                        h_sig.has_value() && h_sig->is_valid) {
+                        try_submit_harv_signal(*h_sig, book, tick.timestamp_ns);
+                    }
                 }
             }
 
@@ -374,7 +527,7 @@ int main(int argc, char* argv[]) {
                 const bool was_be = current_position.is_breakeven_set;
                 const core::Price tick_step = tick_sizes_paise.count(tick.token) ? tick_sizes_paise[tick.token] : 5;
                 const auto [should_exit, exit_reason] =
-                    risk_mgr.check_position_rules(current_position, tick.last_price, tick.timestamp_ns, tick_step, &book);
+                    active_risk_mgr.check_position_rules(current_position, tick.last_price, tick.timestamp_ns, tick_step, &book);
 
                 if (!was_be && current_position.is_breakeven_set) {
                     journal.save_position(current_position);
@@ -437,11 +590,17 @@ int main(int argc, char* argv[]) {
     core::AsyncLogger::instance().flush();
 
     // 9. Post-Trade Performance Audit Report
-    risk_mgr.finalize_session();
+    active_risk_mgr.finalize_session();
     const auto multi_day_report =
-        trade_auditor.generate_report(broker.trade_history(), risk_mgr.kill_switch_history());
+        trade_auditor.generate_report(broker.trade_history(), active_risk_mgr.kill_switch_history());
     std::stringstream report_buf;
     execution::TradeAuditor::print_multi_day_report(multi_day_report, report_buf);
+    if (enable_parallel_harvester) {
+        harv_risk_mgr.finalize_session();
+        const auto harv_report =
+            harv_auditor.generate_report(harv_broker.trade_history(), harv_risk_mgr.kill_switch_history());
+        execution::TradeAuditor::print_dual_mode_comparison(multi_day_report, harv_report, report_buf);
+    }
     std::cout << report_buf.str();
     std::string report_line;
     while (std::getline(report_buf, report_line)) {

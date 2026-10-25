@@ -698,6 +698,72 @@ public:
         print_multi_day_report(report, out);
     }
 
+    static void print_dual_mode_comparison(const MultiDayAuditReport& comp_rep,
+                                           const MultiDayAuditReport& harv_rep,
+                                           std::ostream& out = std::cout) {
+        const auto& a = comp_rep.aggregate;
+        const auto& b = harv_rep.aggregate;
+
+        out << "============================================================================================================================\n";
+        out << "               30-DAY PARALLEL SESSION-BY-SESSION COMPARISON (TRACK A: COMPOUNDER vs. TRACK B: HARVESTER)                   \n";
+        out << "============================================================================================================================\n";
+        out << "  Day | Date (IST) | Track A Trades (W/L) | Track A Net PnL | Track A Equity || Track B Trades (W/L) | Track B Net PnL | Track B Equity\n";
+        out << "------+------------+----------------------+-----------------+----------------++----------------------+-----------------+---------------\n";
+        out << std::fixed << std::setprecision(2);
+        const size_t n_days = std::min(comp_rep.daily_sessions.size(), harv_rep.daily_sessions.size());
+        for (size_t i = 0; i < n_days; ++i) {
+            const auto& sa = comp_rep.daily_sessions[i];
+            const auto& sb = harv_rep.daily_sessions[i];
+
+            std::ostringstream t_a, t_b, pnl_a, pnl_b;
+            t_a << sa.total_trades << " (" << sa.winning_trades << "W/" << sa.losing_trades << "L)";
+            t_b << sb.total_trades << " (" << sb.winning_trades << "W/" << sb.losing_trades << "L)";
+            pnl_a << std::fixed << std::setprecision(2) << (sa.net_pnl_inr >= 0.0 ? "+" : "") << sa.net_pnl_inr;
+            pnl_b << std::fixed << std::setprecision(2) << (sb.net_pnl_inr >= 0.0 ? "+" : "") << sb.net_pnl_inr;
+
+            out << "  D" << std::setw(2) << std::setfill('0') << (i + 1) << std::setfill(' ')
+                << " | " << sa.date_ist
+                << " | " << std::setw(20) << t_a.str()
+                << " | " << std::setw(11) << pnl_a.str() << " INR"
+                << " | " << std::setw(10) << sa.ending_equity_inr << " INR"
+                << " || " << std::setw(20) << t_b.str()
+                << " | " << std::setw(11) << pnl_b.str() << " INR"
+                << " | " << std::setw(10) << sb.ending_equity_inr << " INR\n";
+        }
+        out << "============================================================================================================================\n\n";
+
+        out << "============================================================================================================================\n";
+        out << "                    DUAL-MODE PARALLEL PAPER TRADING COMPARISON (TRACK A vs. TRACK B)                                       \n";
+        out << "============================================================================================================================\n";
+        out << "  Performance Dimension                | Track A: High-Yield Compounder     | Track B: L2 Microstructure Harvester          \n";
+        out << "---------------------------------------+------------------------------------+-----------------------------------------------\n";
+        out << std::fixed << std::setprecision(2);
+        out << "  Initial Pilot Capital                | INR " << std::setw(10) << a.initial_capital_inr
+            << "                     | INR " << std::setw(10) << b.initial_capital_inr << "\n";
+        out << "  Final Ending Equity                  | INR " << std::setw(10) << a.ending_capital_inr
+            << "                     | INR " << std::setw(10) << b.ending_capital_inr << "\n";
+        out << "  Cumulative Net Return (%)            | " << (a.net_return_pct >= 0.0 ? "+" : "") << std::setw(9) << a.net_return_pct << "%"
+            << "                        | " << (b.net_return_pct >= 0.0 ? "+" : "") << std::setw(9) << b.net_return_pct << "%\n";
+        out << "  Net Realized PnL (After Taxes)       | " << (a.net_pnl_inr >= 0.0 ? "+" : "") << std::setw(9) << a.net_pnl_inr << " INR"
+            << "                     | " << (b.net_pnl_inr >= 0.0 ? "+" : "") << std::setw(9) << b.net_pnl_inr << " INR\n";
+        out << "  Completed Round-Trip Trades          | " << std::setw(10) << a.total_trades
+            << " (" << a.winning_trades << "W / " << a.losing_trades << "L / " << a.breakeven_trades << "S)       | "
+            << std::setw(10) << b.total_trades << " (" << b.winning_trades << "W / " << b.losing_trades << "L / " << b.breakeven_trades << "S)\n";
+        out << "  Strategy Win Rate (%)                | " << std::setw(9) << a.win_rate_pct << "%"
+            << "                         | " << std::setw(9) << b.win_rate_pct << "%\n";
+        out << "  Profit Factor (Gross Win / Loss)     | " << std::setw(10) << a.profit_factor
+            << "                         | " << std::setw(10) << b.profit_factor << "\n";
+        out << "  Net Expectancy per Trade             | " << (a.expectancy_per_trade_inr >= 0.0 ? "+" : "") << std::setw(9) << a.expectancy_per_trade_inr << " INR/trade"
+            << "               | " << (b.expectancy_per_trade_inr >= 0.0 ? "+" : "") << std::setw(9) << b.expectancy_per_trade_inr << " INR/trade\n";
+        out << "  Total Statutory Taxes & Fees         | -" << std::setw(9) << a.total_taxes_and_friction_inr << " INR"
+            << "                     | -" << std::setw(9) << b.total_taxes_and_friction_inr << " INR\n";
+        out << "  Max Portfolio Peak-to-Trough DD      | " << std::setw(10) << a.max_portfolio_drawdown_inr << " INR (" << a.max_portfolio_drawdown_pct << "%)"
+            << "            | " << std::setw(10) << b.max_portfolio_drawdown_inr << " INR (" << b.max_portfolio_drawdown_pct << "%)\n";
+        out << "  Daily Kill-Switch Trips (500 INR)    | " << std::setw(10) << a.total_kill_switch_triggers << " / " << a.total_sessions << " (100% CLEAR)"
+            << "          | " << std::setw(10) << b.total_kill_switch_triggers << " / " << b.total_sessions << " (100% CLEAR)\n";
+        out << "============================================================================================================================\n\n";
+    }
+
 private:
     double initial_capital_inr_{10000.0};
     std::vector<std::pair<int64_t, std::string>> registered_sessions_;

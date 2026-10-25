@@ -139,6 +139,7 @@ public:
         const bool is_morning_window =
             (seconds_from_midnight_ist >= cfg_.morning_start_sec && seconds_from_midnight_ist <= cfg_.morning_end_sec);
         const bool is_afternoon_window =
+            !cfg_.disable_afternoon_entries &&
             (seconds_from_midnight_ist >= cfg_.afternoon_start_sec && seconds_from_midnight_ist <= cfg_.afternoon_end_sec);
 
         if (!is_morning_window && !is_afternoon_window) {
@@ -152,8 +153,17 @@ public:
         }
 
         const core::Price risk_per_share_paise = signal.target_entry - signal.stop_loss;
-        const auto qty_by_risk = static_cast<core::Quantity>(max_risk_per_trade_paise_ / risk_per_share_paise);
-        const auto qty_by_capital = static_cast<core::Quantity>(max_position_value_paise_ / signal.target_entry);
+        double comp_mult = 1.0;
+        if (!cfg_.enable_ofi_harvest &&
+            max_position_value_paise_ > core::to_paise(5000.0) &&
+            current_capital_inr_ > cfg_.initial_capital_inr &&
+            cfg_.initial_capital_inr > 0.0) {
+            comp_mult = current_capital_inr_ / cfg_.initial_capital_inr;
+        }
+        const auto dynamic_risk_paise = static_cast<core::Price>(static_cast<double>(max_risk_per_trade_paise_) * comp_mult);
+        const auto dynamic_pos_paise = static_cast<core::Price>(static_cast<double>(max_position_value_paise_) * comp_mult);
+        const auto qty_by_risk = static_cast<core::Quantity>(dynamic_risk_paise / risk_per_share_paise);
+        const auto qty_by_capital = static_cast<core::Quantity>(dynamic_pos_paise / signal.target_entry);
 
         const core::Quantity final_qty = std::min(qty_by_risk, qty_by_capital);
         if (final_qty == 0) {
@@ -222,8 +232,9 @@ public:
         }
 
         // 2b. Progressive Multi-Stage Profit Ratchet & Active L2 Order-Flow Exhaustion Profit Harvest
-        // (Active when live L2 OrderBook depth is available)
-        if (book != nullptr && book->best_bid() > 0) {
+        // (Active in Harvester mode when live L2 OrderBook depth is available)
+        if (book != nullptr && book->best_bid() > 0 &&
+            (cfg_.enable_ofi_harvest || max_position_value_paise_ <= core::to_paise(5000.0))) {
             const core::Price min_net_win_bid = std::max(
                 core::ceil_to_tick(static_cast<core::Price>(static_cast<double>(pos.avg_entry_price) * 1.0015), tick_size_paise),
                 pos.avg_entry_price + 2 * std::max<core::Price>(1, tick_size_paise));

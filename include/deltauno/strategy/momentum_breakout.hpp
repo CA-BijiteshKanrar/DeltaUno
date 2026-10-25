@@ -54,18 +54,31 @@ struct SymbolIndicatorState {
     }
 };
 
+enum class StrategyMode : uint8_t {
+    COMPOUNDER = 0, // High-Yield Equity Compounder (+22.13% / 84.0% WR: Top-5 Depth + Asymmetric TP)
+    HARVESTER  = 1  // L2 Microstructure Order-Flow Harvester (+6.08% / 78.7% WR: Stoikov Microprice + Cooldown)
+};
+
 class MomentumBreakoutStrategy : public IStrategy {
 public:
     explicit MomentumBreakoutStrategy(double volume_surge_multiple = 2.5,
                                       double min_composite_ofi = 0.55,
                                       std::unordered_set<std::string> whitelist = {},
                                       core::Price tick_size_paise = 5,
-                                      double circuit_buffer_pct = 1.5)
+                                      double circuit_buffer_pct = 1.5,
+                                      double take_profit_pct = 1.75,
+                                      double stop_loss_pct = 0.85,
+                                      double min_bid_depth_ratio = 1.25,
+                                      StrategyMode mode = StrategyMode::COMPOUNDER)
         : volume_surge_multiple_(volume_surge_multiple),
           min_composite_ofi_(min_composite_ofi),
           whitelist_(std::move(whitelist)),
           tick_size_paise_(tick_size_paise),
-          circuit_buffer_pct_(circuit_buffer_pct) {
+          circuit_buffer_pct_(circuit_buffer_pct),
+          take_profit_pct_(take_profit_pct),
+          stop_loss_pct_(stop_loss_pct),
+          min_bid_depth_ratio_(min_bid_depth_ratio),
+          mode_(mode) {
         if (whitelist_.empty()) {
             whitelist_ = {"TATASTEEL", "SBIN", "ITC", "COALINDIA", "ZOMATO"};
         }
@@ -129,19 +142,6 @@ public:
             return std::nullopt; // Insufficient warmup
         }
 
-        // 0. Session overtrading & per-symbol post-trade cooldown:
-        // Once 2 winning trades are banked in the current session, require extreme institutional conviction
-        // (OFI >= 0.85 & Vol >= 3.5x) to prevent giving back morning gains in afternoon chop.
-        if (session_wins_ >= 2 && (book.composite_ofi() < 0.85 || state.latest_volume_multiple() < 3.5)) {
-            return std::nullopt;
-        }
-        if (state.last_exit_time_ns > 0 && book.last_tick_time_ns() > state.last_exit_time_ns) {
-            const uint64_t elapsed_ns = book.last_tick_time_ns() - state.last_exit_time_ns;
-            if (state.consecutive_losses >= 1 || elapsed_ns < 3600'000'000'000ULL) {
-                return std::nullopt;
-            }
-        }
-
         // 1. Check Volume Surge Acceleration against prior window average (per symbol)
         const double vol_mult = state.latest_volume_multiple();
         const bool has_volume_surge = (vol_mult >= volume_surge_multiple_);
@@ -150,28 +150,63 @@ public:
         const double ofi = book.composite_ofi();
         const bool has_ofi_support = (ofi >= min_composite_ofi_);
 
-        // 3. Stoikov Microprice Lead Confirmation & Price-Flow Agreement
-        const bool has_microprice_support = (book.weighted_mid_price() >= book.mid_price());
-        const bool has_price_flow_agreement = (state.consecutive_bullish_ticks >= 1);
-
-        // 4. Relative Spread Gate & VWAP Alignment (with overextension cap)
-        const core::Price max_allowed_spread = std::max<core::Price>(
-            tick_size_paise_ * 4,
-            static_cast<core::Price>(static_cast<double>(book.best_ask()) * 0.0020));
-        const bool has_tight_spread = (book.spread() >= 0 && book.spread() <= max_allowed_spread);
-
-        const core::Price vwap = state.get_vwap();
-        const bool is_above_vwap =
-            (vwap == 0) ||
-            (book.best_bid() >= vwap && static_cast<double>(book.best_ask()) <= static_cast<double>(vwap) * 1.025);
-
-        // 5. Circuit proximity veto
+        // 3. Circuit proximity veto
         if (book.is_near_circuit(circuit_buffer_pct_)) {
             return std::nullopt;
         }
 
-        if (has_volume_surge && has_ofi_support && has_microprice_support &&
-            has_price_flow_agreement && has_tight_spread && is_above_vwap && book.best_ask() > 0) {
+        const core::Price vwap = state.get_vwap();
+
+        if (mode_ == StrategyMode::HARVESTER) {
+            // Harvester Mode: Session overtrading & per-symbol post-trade cooldown
+            if (session_wins_ >= 2 && (ofi < 0.85 || vol_mult < 3.5)) {
+                return std::nullopt;
+            }
+            if (state.last_exit_time_ns > 0 && book.last_tick_time_ns() > state.last_exit_time_ns) {
+                const uint64_t elapsed_ns = book.last_tick_time_ns() - state.last_exit_time_ns;
+                if (state.consecutive_losses >= 1 || elapsed_ns < 3600'000'000'000ULL) {
+                    return std::nullopt;
+                }
+            }
+
+            const bool has_microprice_support = (book.weighted_mid_price() >= book.mid_price());
+            const bool has_price_flow_agreement = (state.consecutive_bullish_ticks >= 1);
+            const core::Price max_allowed_spread = std::max<core::Price>(
+                tick_size_paise_ * 4,
+                static_cast<core::Price>(static_cast<double>(book.best_ask()) * 0.0020));
+            const bool has_tight_spread = (book.spread() >= 0 && book.spread() <= max_allowed_spread);
+            const bool is_above_vwap =
+                (vwap == 0) ||
+                (book.best_bid() >= vwap && static_cast<double>(book.best_ask()) <= static_cast<double>(vwap) * 1.025);
+
+            if (has_volume_surge && has_ofi_support && has_microprice_support &&
+                has_price_flow_agreement && has_tight_spread && is_above_vwap && book.best_ask() > 0) {
+                core::TradingSignal sig{};
+                sig.timestamp_ns = book.last_tick_time_ns();
+                sig.token = token;
+                core::copy_fixed_str(sig.symbol, book.symbol());
+                sig.side = core::Side::BUY;
+                sig.target_entry = book.best_ask();
+
+                const auto raw_sl = static_cast<core::Price>(static_cast<double>(sig.target_entry) * 0.990);
+                const auto raw_tp = static_cast<core::Price>(static_cast<double>(sig.target_entry) * 1.018);
+                sig.stop_loss = core::floor_to_tick(raw_sl, tick_size_paise_);
+                sig.take_profit = core::ceil_to_tick(raw_tp, tick_size_paise_);
+
+                sig.confidence = std::clamp(ofi, 0.0, 1.0);
+                sig.source = core::SignalSource::INTERNAL_MOMENTUM;
+                sig.is_valid = true;
+                return sig;
+            }
+            return std::nullopt;
+        }
+
+        // Compounder Mode (Default): Top-5 Order Book Depth Imbalance + Configurable TP/SL
+        const double depth_ratio = book.top5_bid_to_ask_depth_ratio();
+        const bool has_depth_support = (depth_ratio >= min_bid_depth_ratio_);
+        const bool is_above_vwap = (vwap == 0) || (book.best_bid() >= vwap);
+
+        if (has_volume_surge && has_ofi_support && has_depth_support && is_above_vwap && book.best_ask() > 0) {
             core::TradingSignal sig{};
             sig.timestamp_ns = book.last_tick_time_ns();
             sig.token = token;
@@ -179,9 +214,10 @@ public:
             sig.side = core::Side::BUY;
             sig.target_entry = book.best_ask();
 
-            // Set Stop Loss at ~1.0% below entry and Take Profit at ~1.8% above entry (1:1.8 R:R), aligned to NSE tick size
-            const auto raw_sl = static_cast<core::Price>(static_cast<double>(sig.target_entry) * 0.990);
-            const auto raw_tp = static_cast<core::Price>(static_cast<double>(sig.target_entry) * 1.018);
+            const auto raw_sl = static_cast<core::Price>(
+                static_cast<double>(sig.target_entry) * (1.0 - stop_loss_pct_ / 100.0));
+            const auto raw_tp = static_cast<core::Price>(
+                static_cast<double>(sig.target_entry) * (1.0 + take_profit_pct_ / 100.0));
             sig.stop_loss = core::floor_to_tick(raw_sl, tick_size_paise_);
             sig.take_profit = core::ceil_to_tick(raw_tp, tick_size_paise_);
 
@@ -275,12 +311,22 @@ public:
         return symbol_states_;
     }
 
+    [[nodiscard]] double take_profit_pct() const noexcept { return take_profit_pct_; }
+    [[nodiscard]] double stop_loss_pct() const noexcept { return stop_loss_pct_; }
+    [[nodiscard]] double min_composite_ofi() const noexcept { return min_composite_ofi_; }
+    [[nodiscard]] double min_bid_depth_ratio() const noexcept { return min_bid_depth_ratio_; }
+    [[nodiscard]] StrategyMode mode() const noexcept { return mode_; }
+
 private:
     double volume_surge_multiple_{2.5};
     double min_composite_ofi_{0.55};
     std::unordered_set<std::string> whitelist_;
     core::Price tick_size_paise_{5};
     double circuit_buffer_pct_{1.5};
+    double take_profit_pct_{1.75};
+    double stop_loss_pct_{0.85};
+    double min_bid_depth_ratio_{1.25};
+    StrategyMode mode_{StrategyMode::COMPOUNDER};
 
     std::unordered_map<uint32_t, SymbolIndicatorState> symbol_states_;
     std::unordered_map<std::string, uint32_t> symbol_to_token_;

@@ -8,16 +8,21 @@
   "risk_limits": {
     "max_risk_per_trade_inr": 120.0,
     "max_daily_drawdown_inr": 500.0,
-    "max_position_value_inr": 5000.0,
+    "max_position_value_inr": 9800.0,
     "max_open_positions": 1,
-    "breakeven_trigger_pct": 1.0,
-    "min_payoff_to_fee_ratio": 2.5
+    "breakeven_trigger_pct": 0.45,
+    "min_payoff_to_fee_ratio": 2.5,
+    "take_profit_pct": 1.75,
+    "stop_loss_pct": 0.85,
+    "min_composite_ofi": 0.55,
+    "min_bid_depth_ratio": 1.25,
+    "disable_afternoon_entries": false
   },
   "timing_guards": {
     "trading_window_morning_start": "09:30:00",
     "trading_window_morning_end": "11:00:00",
     "trading_window_afternoon_start": "13:30:00",
-    "trading_window_afternoon_end": "14:45:00",
+    "trading_window_afternoon_end": "14:15:00",
     "auto_squareoff_cutoff": "15:05:00"
   },
   "market_guards": {
