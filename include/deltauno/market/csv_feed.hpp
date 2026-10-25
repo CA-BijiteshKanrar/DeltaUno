@@ -31,7 +31,7 @@ public:
     }
 
     bool start() override {
-        std::ifstream file(csv_path_);
+        std::ifstream file(csv_path_, std::ios::in | std::ios::binary);
         if (!file.is_open()) return false;
 
         is_running_.store(true, std::memory_order_release);
@@ -39,7 +39,7 @@ public:
         uint64_t prev_ts = 0;
 
         while (is_running_.load(std::memory_order_acquire)) {
-            const std::streampos line_start = file.tellg();
+            const std::streampos line_start = live_tail_ ? file.tellg() : std::streampos(-1);
             if (!std::getline(file, line)) {
                 if (live_tail_ && is_running_.load(std::memory_order_acquire)) {
                     file.clear();
@@ -70,7 +70,10 @@ public:
             // Optional embedded external alert rows: #ALERT,timestamp_ns,token,symbol,BUY,entry_inr,sl_inr
             if (line.rfind("#ALERT,", 0) == 0) {
                 if (alert_callback_) {
-                    alert_callback_(parse_alert_line(line.substr(7)));
+                    try {
+                        alert_callback_(parse_alert_line(line.substr(7)));
+                    } catch (...) {
+                    }
                 }
                 continue;
             }
@@ -80,7 +83,12 @@ public:
                 continue; // Header row
             }
 
-            const core::MarketTick tick = parse_tick_line(line);
+            core::MarketTick tick{};
+            try {
+                tick = parse_tick_line(line);
+            } catch (...) {
+                continue;
+            }
 
             if (simulate_delay_ && prev_ts != 0 && tick.timestamp_ns > prev_ts) {
                 const uint64_t diff_ns = tick.timestamp_ns - prev_ts;
