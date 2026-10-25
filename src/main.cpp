@@ -13,6 +13,7 @@
 #include "deltauno/strategy/signal_ingestor.hpp"
 
 #include <atomic>
+#include <csignal>
 #include <iomanip>
 #include <iostream>
 #include <memory>
@@ -32,14 +33,28 @@ enum class PositionLifecycle : uint8_t {
     PENDING_EXIT = 3
 };
 
+std::atomic<bool> g_shutdown_requested{false};
+market::CSVFeed* g_active_feed_ptr{nullptr};
+
+void handle_signal(int /* sig */) {
+    g_shutdown_requested.store(true, std::memory_order_release);
+    if (g_active_feed_ptr != nullptr) {
+        g_active_feed_ptr->stop();
+    }
+}
+
 } // namespace
 
 int main(int argc, char* argv[]) {
+    std::signal(SIGINT, handle_signal);
+    std::signal(SIGTERM, handle_signal);
+
     std::string csv_path = "data/sample_nse_ticks.csv";
     std::string config_dir = "config";
     std::string cli_webhook_json;
     std::string run_mode = "both"; // "both" (default), "compounder", or "harvester"
     bool realtime_pacing = false;
+    bool live_tail = false;
     bool verbose_logs = false;
 
     for (int i = 1; i < argc; ++i) {
@@ -54,6 +69,8 @@ int main(int argc, char* argv[]) {
             run_mode = argv[++i];
         } else if (arg == "--realtime") {
             realtime_pacing = true;
+        } else if (arg == "--live-tail") {
+            live_tail = true;
         } else if (arg == "--verbose") {
             verbose_logs = true;
         } else if (!arg.empty() && arg[0] != '-') {
@@ -371,8 +388,9 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    market::CSVFeed feed(csv_path, realtime_pacing, 5);
-    LOG_INFO("Connecting to CSV Market Feed: " + csv_path);
+    market::CSVFeed feed(csv_path, realtime_pacing, 5, live_tail);
+    g_active_feed_ptr = &feed;
+    LOG_INFO(std::string("Connecting to CSV Market Feed: ") + csv_path + (live_tail ? " [LIVE-TAIL MODE]" : ""));
 
     feed.register_callback([&](const core::MarketTick& tick) {
         while (!tick_ring->push(tick)) {

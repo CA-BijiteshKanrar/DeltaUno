@@ -13,10 +13,14 @@ namespace deltauno::market {
 
 class CSVFeed : public IMarketFeed {
 public:
-    explicit CSVFeed(std::string csv_path, bool simulate_realtime_delay = false, core::Price tick_size_paise = 5)
+    explicit CSVFeed(std::string csv_path,
+                     bool simulate_realtime_delay = false,
+                     core::Price tick_size_paise = 5,
+                     bool live_tail = false)
         : csv_path_(std::move(csv_path)),
           simulate_delay_(simulate_realtime_delay),
-          tick_size_paise_(tick_size_paise) {}
+          tick_size_paise_(tick_size_paise),
+          live_tail_(live_tail) {}
 
     void register_callback(TickCallback cb) override {
         callback_ = std::move(cb);
@@ -34,11 +38,34 @@ public:
         std::string line;
         uint64_t prev_ts = 0;
 
-        while (is_running_.load(std::memory_order_acquire) && std::getline(file, line)) {
+        while (is_running_.load(std::memory_order_acquire)) {
+            const std::streampos line_start = file.tellg();
+            if (!std::getline(file, line)) {
+                if (live_tail_ && is_running_.load(std::memory_order_acquire)) {
+                    file.clear();
+                    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                    continue;
+                }
+                break;
+            }
+
+            // In live_tail_ mode, if EOF was hit mid-line (before '\n' was flushed), rewind and wait
+            if (live_tail_ && file.eof() && line_start != std::streampos(-1)) {
+                file.clear();
+                file.seekg(line_start);
+                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+                continue;
+            }
+
             if (!line.empty() && line.back() == '\r') {
                 line.pop_back();
             }
             if (line.empty()) continue;
+
+            // Clean session termination sentinel for live-tail streaming
+            if (line.rfind("#SESSION_END", 0) == 0 || line.rfind("#EOF", 0) == 0) {
+                break;
+            }
 
             // Optional embedded external alert rows: #ALERT,timestamp_ns,token,symbol,BUY,entry_inr,sl_inr
             if (line.rfind("#ALERT,", 0) == 0) {
@@ -127,13 +154,25 @@ private:
         if (!uc_str.empty()) tick.upper_circuit = core::to_paise(std::stod(uc_str));
         if (!lc_str.empty()) tick.lower_circuit = core::to_paise(std::stod(lc_str));
 
-        // Synthesize depth levels 1-4 separated by standard NSE tick size when CSV carries top-of-book
+        // Parse optional real L2 levels 1-4 (bid1_p,bid1_q,ask1_p,ask1_q,...,bid4_p,bid4_q,ask4_p,ask4_q) if present;
+        // otherwise synthesize depth levels 1-4 separated by standard NSE tick size when CSV carries top-of-book
         for (size_t i = 1; i < 5; ++i) {
-            const core::Price step = static_cast<core::Price>(i) * tick_size_paise_;
-            tick.bids[i].price = std::max<core::Price>(0, tick.bids[0].price - step);
-            tick.bids[i].quantity = tick.bids[0].quantity + static_cast<core::Quantity>(i * 100);
-            tick.asks[i].price = tick.asks[0].price + step;
-            tick.asks[i].quantity = tick.asks[0].quantity + static_cast<core::Quantity>(i * 100);
+            const std::string bi_p = get_next();
+            const std::string bi_q = get_next();
+            const std::string ai_p = get_next();
+            const std::string ai_q = get_next();
+            if (!bi_p.empty() && !bi_q.empty() && !ai_p.empty() && !ai_q.empty()) {
+                tick.bids[i].price = core::to_paise(std::stod(bi_p));
+                tick.bids[i].quantity = static_cast<core::Quantity>(std::stoul(bi_q));
+                tick.asks[i].price = core::to_paise(std::stod(ai_p));
+                tick.asks[i].quantity = static_cast<core::Quantity>(std::stoul(ai_q));
+            } else {
+                const core::Price step = static_cast<core::Price>(i) * tick_size_paise_;
+                tick.bids[i].price = std::max<core::Price>(0, tick.bids[0].price - step);
+                tick.bids[i].quantity = tick.bids[0].quantity + static_cast<core::Quantity>(i * 100);
+                tick.asks[i].price = tick.asks[0].price + step;
+                tick.asks[i].quantity = tick.asks[0].quantity + static_cast<core::Quantity>(i * 100);
+            }
         }
 
         return tick;
@@ -170,6 +209,7 @@ private:
     std::string csv_path_;
     bool simulate_delay_{false};
     core::Price tick_size_paise_{5};
+    bool live_tail_{false};
     std::atomic<bool> is_running_{false};
     TickCallback callback_;
     ExternalAlertCallback alert_callback_;

@@ -11,3 +11,5 @@ deltauno_state.json
 tradeuno_state.json
 test_state*.json
 data/circuit_ticks.csv
+data/live_*.csv
+config/live_broker.env
