@@ -136,14 +136,7 @@ int main(int argc, char* argv[]) {
 
     // 5. Initialize Strategy Pipeline & "BS Detector" Signal Ingestor
     strategy::MomentumBreakoutStrategy momentum_strat(
-        2.5,
-        risk_cfg.min_composite_ofi,
-        whitelist,
-        5,
-        risk_cfg.circuit_limit_buffer_pct,
-        risk_cfg.take_profit_pct,
-        risk_cfg.stop_loss_pct,
-        risk_cfg.min_bid_depth_ratio);
+        2.5, 0.55, whitelist, 5, risk_cfg.circuit_limit_buffer_pct);
     strategy::SignalIngestor bs_detector(
         whitelist, 2.0, risk_cfg.max_15s_volume_burst_multiple, 0.20, risk_cfg.circuit_limit_buffer_pct, 5);
 
@@ -381,7 +374,7 @@ int main(int argc, char* argv[]) {
                 const bool was_be = current_position.is_breakeven_set;
                 const core::Price tick_step = tick_sizes_paise.count(tick.token) ? tick_sizes_paise[tick.token] : 5;
                 const auto [should_exit, exit_reason] =
-                    risk_mgr.check_position_rules(current_position, tick.last_price, tick.timestamp_ns, tick_step);
+                    risk_mgr.check_position_rules(current_position, tick.last_price, tick.timestamp_ns, tick_step, &book);
 
                 if (!was_be && current_position.is_breakeven_set) {
                     journal.save_position(current_position);

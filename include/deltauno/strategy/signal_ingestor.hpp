@@ -97,9 +97,18 @@ public:
             return {std::nullopt, VetoReason::INVALID_PARAMETERS};
         }
 
-        // 2. BS Detector: Verify local L2 Order Flow Imbalance (OFI)
-        if (book.composite_ofi() < min_ofi_) {
+        // 2. BS Detector: Verify local L2 Order Flow Imbalance (OFI) & Stoikov Microprice Queue Support
+        if (book.composite_ofi() < min_ofi_ || book.weighted_mid_price() < book.mid_price()) {
             return {std::nullopt, VetoReason::NEGATIVE_ORDER_FLOW};
+        }
+
+        // 2b. Minimum Viable Stop-Loss Cushion (>= 0.25% below ask to prevent 1-2 tick noise stop-out traps)
+        if (suggested_sl > 0 && suggested_sl < book.best_ask()) {
+            const double sl_dist_pct =
+                static_cast<double>(book.best_ask() - suggested_sl) / static_cast<double>(book.best_ask()) * 100.0;
+            if (sl_dist_pct < 0.25) {
+                return {std::nullopt, VetoReason::INVALID_PARAMETERS};
+            }
         }
 
         // 3. Overcrowding & Exit-Trap Filter (Pelster & Hofmann 2018)

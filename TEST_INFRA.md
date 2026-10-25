@@ -162,28 +162,13 @@ All statutory taxes are validated against official Indian exchange standards usi
 |:---|:---|:---|
 | **STT (Securities Transaction Tax)** | 0.025% (0.00025) | Sell-side turnover only |
 | **NSE Turnover Fee** | 0.00297% (0.0000297) | Both Buy-side and Sell-side turnover |
-| **SEBI Turnover Fee** | INR 10 per INR 1 Crore (INR 0.000001 per INR) | Both Buy-side and Sell-side turnover |
+| **SEBI Turnover Fee** | ₹10 per ₹1 Crore (₹0.000001 per INR) | Both Buy-side and Sell-side turnover |
 | **GST (Goods & Services Tax)** | 18% (0.18) | Applicable on (NSE Turnover Fee + SEBI Fee) |
 | **Stamp Duty** | 0.003% (0.00003) | Buy-side turnover only (effective July 1, 2020) |
 
 ---
 
-## 7. Subprocess Isolation & Windows File Contention Resilience
-
-To eliminate cross-test file contention, log pollution, and Windows file-locking `PermissionError: [WinError 32]` issues during concurrent or sequential test execution:
-
-1. **Ephemeral Working Directory Isolation**:
-   Every test execution of `deltauno.exe` runs inside an isolated `tempfile.TemporaryDirectory(prefix="deltauno_e2e_")`. The engine process is launched with its working directory `cwd=temp_dir.name`.
-2. **Configuration & State Journal Decoupling**:
-   The engine's `config/` directory is automatically copied into the temporary sandbox. Initial state journals are injected directly into the sandbox without touching repository root.
-3. **In-Memory Harvest Before Teardown**:
-   Prior to cleaning up the sandbox, `deltauno.log` and `deltauno_state.json` are read into memory and attached to `EngineRunResult` (`log_lines`, `state_journal`, `state_journal_raw`).
-4. **Retry Backoff with Fallback**:
-   On Windows, background antivirus or process teardown latency can hold transient file handles. The test harness implements `safe_unlink` and `safe_cleanup_tempdir` with exponential backoff (up to 5 retries) and `chmod(0o777)` fallback before removal.
-
----
-
-## 8. Known Variances & Concurrency Invariant Documentation
+## 7. Known Variances & Concurrency Invariant Documentation
 
 In `deltauno.exe`, market tick reading and external alerts are ingested via lock-free SPSC ring buffers across two threads:
 - Producer thread: Reads CSV feed lines sequentially and pushes ticks to `tick_ring` (capacity 4096) and alerts to `alert_ring` (capacity 256).
@@ -192,11 +177,11 @@ In `deltauno.exe`, market tick reading and external alerts are ingested via lock
 In `data/historical_30days_nse.csv`, external webhook alerts are embedded as comment lines (`#ALERT,...`). Depending on OS thread scheduling when running under full CPU load, an embedded alert on Day 7 (`TATASTEEL BUY`) may be popped by the consumer thread when the order book has momentarily negative order flow (resulting in a BS-detector veto and 47 total completed trades) or when the order book has positive order flow (resulting in signal acceptance and 48 total completed trades).
 
 Both execution outcomes are mathematically verified and accepted by the test harness:
-- **48-Trade Benchmark**: Ending Equity INR 10,201.05 (+2.01%), 21 Wins, 27 Losses, 0 Scratches, STT INR 57.81, Total Taxes INR 81.49, Peak HWM INR 10,348.21.
-- **47-Trade Benchmark**: Ending Equity INR 10,214.02 (+2.14%), 21 Wins, 26 Losses, 0 Scratches, STT INR 56.58, Total Taxes INR 79.74, Peak HWM INR 10,361.17.
+- **48-Trade Benchmark**: Ending Equity ₹10,201.05 (+2.01%), 21 Wins, 27 Losses, 0 Scratches, STT ₹57.81, Total Taxes ₹81.49, Peak HWM ₹10,348.21.
+- **47-Trade Benchmark**: Ending Equity ₹10,214.02 (+2.14%), 21 Wins, 26 Losses, 0 Scratches, STT ₹56.58, Total Taxes ₹79.74, Peak HWM ₹10,361.17.
 
 In both branches, the fundamental institutional invariants hold with 100% precision:
 1. Zero overnight carry across all 30 session boundaries (100% flat at EOD).
 2. Zero kill-switch activations (100% SAFE across all 30 sessions).
-3. Worst intraday drawdown strictly bounded well below the INR 500.00 limit (max observed: INR 81.06).
-4. `Starting Capital (INR 10,000.00) + Sum(Daily Net PnL) == Final Closing Equity` holds down to the exact paisa.
+3. Worst intraday drawdown strictly bounded well below the ₹500.00 limit (max observed: ₹81.06).
+4. `Starting Capital (₹10,000.00) + Sum(Daily Net PnL) == Final Closing Equity` holds down to the exact paisa.

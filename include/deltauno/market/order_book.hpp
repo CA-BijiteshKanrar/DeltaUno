@@ -121,17 +121,6 @@ public:
         return asks_[0].price - bids_[0].price;
     }
 
-    [[nodiscard]] double top5_bid_to_ask_depth_ratio() const noexcept {
-        uint64_t total_bids = 0;
-        uint64_t total_asks = 0;
-        for (size_t i = 0; i < 5; ++i) {
-            total_bids += bids_[i].quantity;
-            total_asks += asks_[i].quantity;
-        }
-        if (total_asks == 0) return 999.0;
-        return static_cast<double>(total_bids) / static_cast<double>(total_asks);
-    }
-
     [[nodiscard]] double composite_ofi() const noexcept {
         if (ofi_history_.empty()) return 0.0;
 

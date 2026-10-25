@@ -2,6 +2,7 @@
 
 #include "deltauno/core/config_loader.hpp"
 #include "deltauno/core/types.hpp"
+#include "deltauno/market/order_book.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -138,7 +139,6 @@ public:
         const bool is_morning_window =
             (seconds_from_midnight_ist >= cfg_.morning_start_sec && seconds_from_midnight_ist <= cfg_.morning_end_sec);
         const bool is_afternoon_window =
-            !cfg_.disable_afternoon_entries &&
             (seconds_from_midnight_ist >= cfg_.afternoon_start_sec && seconds_from_midnight_ist <= cfg_.afternoon_end_sec);
 
         if (!is_morning_window && !is_afternoon_window) {
@@ -152,16 +152,8 @@ public:
         }
 
         const core::Price risk_per_share_paise = signal.target_entry - signal.stop_loss;
-        double comp_mult = 1.0;
-        if (max_position_value_paise_ > core::to_paise(5000.0) &&
-            current_capital_inr_ > cfg_.initial_capital_inr &&
-            cfg_.initial_capital_inr > 0.0) {
-            comp_mult = current_capital_inr_ / cfg_.initial_capital_inr;
-        }
-        const auto dynamic_risk_paise = static_cast<core::Price>(static_cast<double>(max_risk_per_trade_paise_) * comp_mult);
-        const auto dynamic_pos_paise = static_cast<core::Price>(static_cast<double>(max_position_value_paise_) * comp_mult);
-        const auto qty_by_risk = static_cast<core::Quantity>(dynamic_risk_paise / risk_per_share_paise);
-        const auto qty_by_capital = static_cast<core::Quantity>(dynamic_pos_paise / signal.target_entry);
+        const auto qty_by_risk = static_cast<core::Quantity>(max_risk_per_trade_paise_ / risk_per_share_paise);
+        const auto qty_by_capital = static_cast<core::Quantity>(max_position_value_paise_ / signal.target_entry);
 
         const core::Quantity final_qty = std::min(qty_by_risk, qty_by_capital);
         if (final_qty == 0) {
@@ -187,12 +179,14 @@ public:
         return {final_qty, RiskRejection::NONE};
     }
 
-    // Monitors open position for MAE/MFE, Zero-Loss Break-Even Trailing Stop & 15:05 Auto-Squareoff
+    // Monitors open position for MAE/MFE, Zero-Loss Break-Even Trailing Stop,
+    // Progressive Profit Ratcheting, Active L2 Order-Flow Exhaustion Profit Harvest & 15:05 Auto-Squareoff
     [[nodiscard]] std::pair<bool, std::string>
     check_position_rules(core::Position& pos,
                          core::Price current_market_price,
                          uint64_t current_time_ns,
-                         core::Price tick_size_paise = 5) {
+                         core::Price tick_size_paise = 5,
+                         const market::OrderBook* book = nullptr) {
         pos.current_price = current_market_price;
 
         if (pos.peak_favorable_price == 0) {
@@ -227,9 +221,48 @@ public:
             pos.is_breakeven_set = true;
         }
 
+        // 2b. Progressive Multi-Stage Profit Ratchet & Active L2 Order-Flow Exhaustion Profit Harvest
+        // (Active when live L2 OrderBook depth is available)
+        if (book != nullptr && book->best_bid() > 0) {
+            const core::Price min_net_win_bid = std::max(
+                core::ceil_to_tick(static_cast<core::Price>(static_cast<double>(pos.avg_entry_price) * 1.0015), tick_size_paise),
+                pos.avg_entry_price + 2 * std::max<core::Price>(1, tick_size_paise));
+
+            // Progressive profit floor ratcheting at +0.40% and +0.70% MFE
+            const auto stage1_trigger = static_cast<core::Price>(static_cast<double>(pos.avg_entry_price) * 1.0040);
+            const auto stage2_trigger = static_cast<core::Price>(static_cast<double>(pos.avg_entry_price) * 1.0070);
+            if (current_market_price >= stage2_trigger) {
+                const core::Price stage2_lock = std::max(
+                    min_net_win_bid,
+                    core::ceil_to_tick(static_cast<core::Price>(static_cast<double>(pos.avg_entry_price) * 1.0035), tick_size_paise));
+                pos.current_stop_loss = std::max(pos.current_stop_loss, stage2_lock);
+            } else if (current_market_price >= stage1_trigger) {
+                pos.current_stop_loss = std::max(pos.current_stop_loss, min_net_win_bid);
+            }
+
+            // Active L2 OFI Exhaustion / Pullback Profit Harvest:
+            // Never interrupt a trade while it is actively making new highs (current_market_price >= pos.peak_favorable_price).
+            // Once price pulls back from its peak MFE (or stalls > 15 minutes) while executable best_bid is still in
+            // net profit (covering NSE statutory taxes + Tick[t+1] slippage) and order flow weakens, harvest profit
+            // before the short-horizon impulse mean-reverts into a loss.
+            const bool is_pulling_back_or_stalled =
+                (current_market_price < pos.peak_favorable_price) ||
+                (pos.open_time_ns > 0 && current_time_ns > pos.open_time_ns &&
+                 (current_time_ns - pos.open_time_ns) >= 900'000'000'000ULL);
+            if (is_pulling_back_or_stalled && book->best_bid() >= min_net_win_bid) {
+                const bool ofi_exhausted = (book->composite_ofi() < 0.35);
+                const bool microprice_reversed = (book->weighted_mid_price() < book->mid_price());
+                if (ofi_exhausted || microprice_reversed) {
+                    return {true, "OFI_EXHAUSTION_PROFIT_HARVEST"};
+                }
+            }
+        }
+
         // 3. Stop-Loss Trigger Check
         if (current_market_price <= pos.current_stop_loss) {
-            return {true, pos.is_breakeven_set ? "BREAKEVEN_STOP_TRIGGERED" : "STOP_LOSS_TRIGGERED"};
+            return {true, (pos.is_breakeven_set || pos.current_stop_loss > pos.avg_entry_price)
+                              ? "BREAKEVEN_STOP_TRIGGERED"
+                              : "STOP_LOSS_TRIGGERED"};
         }
 
         // 4. Take-Profit Trigger Check
