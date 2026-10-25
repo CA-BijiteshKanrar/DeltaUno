@@ -1,0 +1,28 @@
+{
+  "account": {
+    "initial_capital_inr": 1000.0,
+    "currency": "INR",
+    "leverage_mode": "CONTROLLED_INTRADAY_MIS",
+    "max_account_leverage": 2.0
+  },
+  "risk_limits": {
+    "max_risk_per_trade_inr": 12.0,
+    "max_daily_drawdown_inr": 50.0,
+    "max_position_value_inr": 500.0,
+    "max_open_positions": 1,
+    "breakeven_trigger_pct": 1.0,
+    "min_payoff_to_fee_ratio": 2.5
+  },
+  "timing_guards": {
+    "trading_window_morning_start": "09:30:00",
+    "trading_window_morning_end": "11:00:00",
+    "trading_window_afternoon_start": "13:30:00",
+    "trading_window_afternoon_end": "14:45:00",
+    "auto_squareoff_cutoff": "15:05:00"
+  },
+  "market_guards": {
+    "circuit_limit_buffer_pct": 1.5,
+    "max_15s_volume_burst_multiple": 4.0,
+    "heartbeat_timeout_seconds": 5
+  }
+}

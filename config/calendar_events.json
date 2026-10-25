@@ -1,0 +1,22 @@
+{
+  "macro_events": [
+    {
+      "name": "RBI Monetary Policy Statement",
+      "date": "2026-12-04",
+      "freeze_start": "09:45:00",
+      "freeze_end": "11:30:00"
+    },
+    {
+      "name": "Union Budget Presentation",
+      "date": "2027-02-01",
+      "freeze_start": "10:30:00",
+      "freeze_end": "14:00:00"
+    },
+    {
+      "name": "US FOMC Interest Rate Decision",
+      "date": "2026-11-06",
+      "freeze_start": "09:15:00",
+      "freeze_end": "10:00:00"
+    }
+  ]
+}

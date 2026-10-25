@@ -1,0 +1,5 @@
+build/
+.cache/
+*.log
+tradeuno_state.json
+test_state.json

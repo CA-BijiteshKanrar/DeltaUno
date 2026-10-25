@@ -1,0 +1,59 @@
+{
+  "instruments": [
+    {
+      "token": 349121,
+      "symbol": "TATASTEEL",
+      "exchange": "NSE",
+      "tick_size": 0.05,
+      "lot_size": 1,
+      "reference_price_inr": 150.0,
+      "upper_circuit_inr": 165.0,
+      "lower_circuit_inr": 135.0,
+      "avg_daily_volume": 45000000
+    },
+    {
+      "token": 779521,
+      "symbol": "SBIN",
+      "exchange": "NSE",
+      "tick_size": 0.05,
+      "lot_size": 1,
+      "reference_price_inr": 800.0,
+      "upper_circuit_inr": 880.0,
+      "lower_circuit_inr": 720.0,
+      "avg_daily_volume": 18000000
+    },
+    {
+      "token": 424961,
+      "symbol": "ITC",
+      "exchange": "NSE",
+      "tick_size": 0.05,
+      "lot_size": 1,
+      "reference_price_inr": 480.0,
+      "upper_circuit_inr": 528.0,
+      "lower_circuit_inr": 432.0,
+      "avg_daily_volume": 14000000
+    },
+    {
+      "token": 521729,
+      "symbol": "COALINDIA",
+      "exchange": "NSE",
+      "tick_size": 0.05,
+      "lot_size": 1,
+      "reference_price_inr": 460.0,
+      "upper_circuit_inr": 506.0,
+      "lower_circuit_inr": 414.0,
+      "avg_daily_volume": 12000000
+    },
+    {
+      "token": 895745,
+      "symbol": "ZOMATO",
+      "exchange": "NSE",
+      "tick_size": 0.05,
+      "lot_size": 1,
+      "reference_price_inr": 250.0,
+      "upper_circuit_inr": 275.0,
+      "lower_circuit_inr": 225.0,
+      "avg_daily_volume": 35000000
+    }
+  ]
+}
