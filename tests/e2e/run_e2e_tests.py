@@ -40,6 +40,30 @@ from tests.e2e.e2e_context import (
     find_engine_executable,
 )
 
+# Reconfigure stdout/stderr for UTF-8 cross-platform console stability
+if sys.platform == "win32":
+    try:
+        if hasattr(sys.stdout, "reconfigure"):
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        if hasattr(sys.stderr, "reconfigure"):
+            sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
+
+def sanitize_output(text: Optional[str]) -> str:
+    """Sanitize docstrings and messages to pure ASCII for console safety."""
+    if not text:
+        return ""
+    clean = text.replace("\u20b9", "INR ")
+    encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
+    try:
+        clean.encode(encoding)
+        return clean
+    except UnicodeEncodeError:
+        return clean.encode("ascii", errors="replace").decode("ascii")
+
+
 # Tier Modules Mapping
 TIER_MODULES = {
     1: {
@@ -115,7 +139,7 @@ class DetailedTestResult(unittest.TestResult):
         self._start_time = time.perf_counter()
         if self.verbose:
             doc = (test.shortDescription() or "").strip()
-            print(f"  [{test.id().split('.')[-1]}] {doc} ... ", end="", flush=True)
+            print(f"  [{test.id().split('.')[-1]}] {sanitize_output(doc)} ... ", end="", flush=True)
 
     def addSuccess(self, test):
         super().addSuccess(test)
@@ -314,6 +338,20 @@ def main():
             print(f"Error: Invalid --tier argument '{args.tier}'. Expected numbers 1-4 or 'all'.")
             sys.exit(2)
 
+    invalid_tiers = [t for t in selected_tiers if t not in TIER_MODULES]
+    if invalid_tiers or not selected_tiers:
+        print(f"Error: Invalid --tier argument '{args.tier}'. Expected numbers 1-4 or 'all'.")
+        sys.exit(2)
+
+    # Pre-flight cleanup of any stale artifacts in REPO_ROOT
+    for stale_name in ("deltauno.log", "deltauno_state.json"):
+        stale_path = REPO_ROOT / stale_name
+        if stale_path.exists():
+            try:
+                stale_path.unlink()
+            except OSError:
+                pass
+
     # Verify engine binary
     try:
         engine_bin = find_engine_executable()
@@ -333,8 +371,14 @@ def main():
             print(f"\n--- {TIER_MODULES[tier]['name']} ({len(tests)} tests) ---")
             for t in tests:
                 doc = (t.shortDescription() or "").strip()
-                print(f"  {t.id()} : {doc}")
+                print(f"  {t.id()} : {sanitize_output(doc)}")
         print(f"\nTotal Matching Tests: {total_found}")
+        if total_found == 0:
+            if args.feature:
+                print(f"Error: No tests found matching feature '{args.feature}'. Valid features are F01 through F16.")
+            else:
+                print("Error: No tests found matching specified criteria.")
+            sys.exit(2)
         sys.exit(0)
 
     # Run tests
@@ -376,7 +420,7 @@ def main():
         print("=" * 86)
         for r in failed_records:
             print(f"\n[{r.status}] {r.test_id}")
-            print(f"Doc: {r.doc}")
+            print(f"Doc: {sanitize_output(r.doc)}")
             print("-" * 60)
             print(r.error_message.strip())
             print("-" * 60)
@@ -388,7 +432,14 @@ def main():
     pass_pct = (total_passed / total_tests * 100.0) if total_tests > 0 else 0.0
 
     print("=" * 86)
-    if failed_records:
+    if total_tests == 0:
+        if args.feature:
+            print(f"  ERROR: No tests found matching feature filter '{args.feature}'. Valid features are F01 through F16.")
+        else:
+            print("  ERROR: No tests were executed.")
+        print("=" * 86)
+        sys.exit(2)
+    elif failed_records:
         print(f"  VERDICT: \033[91mFAILED\033[0m -- {len(failed_records)}/{total_tests} tests failed.")
         print("=" * 86)
         sys.exit(1)

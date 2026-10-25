@@ -5,14 +5,17 @@ Provides engine execution wrappers, table output parsers, log analyzers,
 and the independent Indian Statutory Regulatory Oracle.
 """
 
+import json
 import os
 import re
+import shutil
 import subprocess
 import tempfile
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Any
+from typing import Dict, List, Optional, Tuple, Any, Union
 
 # Root repository directory
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -21,6 +24,43 @@ DATA_SAMPLE = REPO_ROOT / "data" / "sample_nse_ticks.csv"
 CONFIG_DIR = REPO_ROOT / "config"
 
 IST_OFFSET = timedelta(hours=5, minutes=30)
+
+
+def safe_unlink(path: Path, max_retries: int = 5, delay: float = 0.03):
+    """Safely unlink a file on Windows with retry backoff."""
+    if not path.exists():
+        return
+    for attempt in range(max_retries):
+        try:
+            path.unlink()
+            return
+        except OSError:
+            time.sleep(delay * (1.5 ** attempt))
+
+
+def safe_cleanup_tempdir(td: tempfile.TemporaryDirectory, retries: int = 5, base_delay: float = 0.05):
+    """Safely cleanup a TemporaryDirectory on Windows with backoff and chmod fallback."""
+    for attempt in range(retries):
+        try:
+            td.cleanup()
+            return
+        except OSError:
+            time.sleep(base_delay * (1.5 ** attempt))
+    # Fallback: force writeable permissions on all child items
+    try:
+        p = Path(td.name)
+        if p.exists():
+            for root, dirs, files in os.walk(p):
+                for f in files:
+                    try:
+                        fp = Path(root) / f
+                        fp.chmod(0o777)
+                        fp.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+            shutil.rmtree(p, ignore_errors=True)
+    except Exception:
+        pass
 
 
 def ist_to_utc_ns(ymd: str, hms: str) -> int:
@@ -221,6 +261,8 @@ class EngineRunResult:
     rollover_events: List[Tuple[int, float]] = field(default_factory=list)
     rejections: List[str] = field(default_factory=list)
     vetoes: List[str] = field(default_factory=list)
+    state_journal: Optional[Dict[str, Any]] = None
+    state_journal_raw: Optional[str] = None
 
 
 def parse_engine_output(stdout_str: str, log_lines: List[str]) -> EngineRunResult:
@@ -468,56 +510,110 @@ def run_engine(
     config_dir: Optional[str] = None,
     webhook: Optional[str] = None,
     extra_args: Optional[List[str]] = None,
-    cwd: Optional[Path] = None,
+    cwd: Optional[Union[Path, str]] = None,
     preserve_state: bool = False,
+    initial_state: Optional[Union[dict, str, Path]] = None,
+    timeout_s: float = 60.0,
 ) -> EngineRunResult:
-    """Execute the DeltaUno binary via CLI and capture structured results."""
+    """Execute the DeltaUno binary inside an isolated temporary directory."""
     engine_bin = find_engine_executable()
-    work_dir = cwd or REPO_ROOT
 
-    # Clean prior log and state journal if present
-    log_file = work_dir / "deltauno.log"
-    state_file = work_dir / "deltauno_state.json"
+    # Resolve CSV path: if relative and exists in REPO_ROOT, make absolute
+    csv_p = Path(csv_path)
+    if not csv_p.is_absolute():
+        repo_candidate = REPO_ROOT / csv_p
+        if repo_candidate.exists():
+            csv_p = repo_candidate.resolve()
+
+    # Determine execution working directory
+    is_temp = False
+    temp_obj = None
+    if cwd is not None:
+        work_dir = Path(cwd).resolve()
+    else:
+        temp_obj = tempfile.TemporaryDirectory(prefix="deltauno_e2e_")
+        work_dir = Path(temp_obj.name).resolve()
+        is_temp = True
+
     try:
-        with open(log_file, "w", encoding="utf-8") as f:
-            pass
-    except OSError:
-        pass
-    if not preserve_state and state_file.exists():
-        try:
-            state_file.unlink()
-        except OSError:
-            pass
+        # 1. Provide config directory inside work_dir if not explicitly specified
+        dest_config = work_dir / "config"
+        if not dest_config.exists() and (REPO_ROOT / "config").exists():
+            shutil.copytree(REPO_ROOT / "config", dest_config)
 
-    cmd = [str(engine_bin), "--csv", str(csv_path)]
-    if config_dir:
-        cmd.extend(["--config-dir", str(config_dir)])
-    if webhook:
-        cmd.extend(["--webhook", webhook])
-    if extra_args:
-        cmd.extend(extra_args)
+        # 2. Inject initial state journal if requested for crash-recovery testing
+        state_file = work_dir / "deltauno_state.json"
+        if initial_state is not None:
+            if isinstance(initial_state, dict):
+                with open(state_file, "w", encoding="utf-8") as f:
+                    json.dump(initial_state, f)
+            elif isinstance(initial_state, str):
+                with open(state_file, "w", encoding="utf-8") as f:
+                    f.write(initial_state)
+            elif isinstance(initial_state, Path):
+                shutil.copyfile(initial_state, state_file)
+        elif not preserve_state and state_file.exists():
+            safe_unlink(state_file)
 
-    proc = subprocess.run(
-        cmd,
-        cwd=work_dir,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-    )
+        # 3. Clean prior log inside work_dir
+        log_file = work_dir / "deltauno.log"
+        if log_file.exists():
+            safe_unlink(log_file)
 
-    log_lines = []
-    if log_file.exists():
-        try:
-            with open(log_file, "r", encoding="utf-8", errors="replace") as f:
-                log_lines = [line.strip() for line in f]
-        except Exception:
-            pass
+        # 4. Construct CLI command
+        cmd = [str(engine_bin), "--csv", str(csv_p)]
+        if config_dir:
+            cmd.extend(["--config-dir", str(config_dir)])
+        if webhook:
+            cmd.extend(["--webhook", webhook])
+        if extra_args:
+            cmd.extend(extra_args)
 
-    parsed = parse_engine_output(proc.stdout, log_lines)
-    parsed.returncode = proc.returncode
-    parsed.stderr = proc.stderr
-    return parsed
+        # 5. Execute subprocess
+        proc = subprocess.run(
+            cmd,
+            cwd=work_dir,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout_s,
+        )
+
+        # 6. Read log lines with retry loop for Windows handle release
+        log_lines = []
+        if log_file.exists():
+            for attempt in range(5):
+                try:
+                    with open(log_file, "r", encoding="utf-8", errors="replace") as f:
+                        log_lines = [line.strip() for line in f]
+                    break
+                except OSError:
+                    time.sleep(0.02)
+
+        # 7. Harvest state journal before directory cleanup
+        state_raw = None
+        state_parsed = None
+        if state_file.exists():
+            for attempt in range(5):
+                try:
+                    with open(state_file, "r", encoding="utf-8", errors="replace") as f:
+                        state_raw = f.read()
+                    state_parsed = json.loads(state_raw)
+                    break
+                except (OSError, json.JSONDecodeError):
+                    time.sleep(0.02)
+
+        parsed = parse_engine_output(proc.stdout, log_lines)
+        parsed.returncode = proc.returncode
+        parsed.stderr = proc.stderr
+        parsed.state_journal = state_parsed
+        parsed.state_journal_raw = state_raw
+        return parsed
+
+    finally:
+        if is_temp and temp_obj is not None:
+            safe_cleanup_tempdir(temp_obj)
 
 
 # ==============================================================================

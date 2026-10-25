@@ -144,7 +144,6 @@ class TestTier3_PairwiseCombinations(unittest.TestCase):
     def test_p09_state_journal_recovery_and_stop_loss_exit(self):
         """Pair 9 (Features 14 & 16): Crash recovery state journal + broker matching.
         Verifies state journal recovers open position and manages stop loss on restart."""
-        state_file = REPO_ROOT / "deltauno_state.json"
         pos_data = {
             "has_position": True,
             "token": 349121,
@@ -160,8 +159,6 @@ class TestTier3_PairwiseCombinations(unittest.TestCase):
             "worst_adverse_price": 15000,
             "is_breakeven_set": False
         }
-        with open(state_file, "w") as f:
-            json.dump(pos_data, f)
 
         # Provide a tick that breaches stop loss at 146.50
         ts = ist_to_utc_ns("2026-11-04", "09:40:00")
@@ -183,15 +180,13 @@ class TestTier3_PairwiseCombinations(unittest.TestCase):
                 "lower_c": 135.00
             } for i in range(5)]
             write_tick_csv(ticks, Path(tp))
-            res = run_engine(tp, preserve_state=True)
+            res = run_engine(tp, initial_state=pos_data, preserve_state=True)
             self.assertEqual(res.returncode, 0)
             self.assertTrue(any("CRASH RECOVERY" in l for l in res.log_lines))
             self.assertTrue(any("STOP_LOSS_TRIGGERED" in l for l in res.log_lines))
         finally:
-            if os.path.exists(tp): os.remove(tp)
-            if state_file.exists():
-                try: state_file.unlink()
-                except OSError: pass
+            if os.path.exists(tp):
+                os.remove(tp)
 
     def test_p10_payoff_to_fee_filter_and_statutory_taxes(self):
         """Pair 10 (Features 9 & 11): Pre-trade payoff filter + statutory tax oracle.
@@ -202,25 +197,56 @@ class TestTier3_PairwiseCombinations(unittest.TestCase):
 
     def test_p11_cumulative_pilot_stopout_and_session_rollover(self):
         """Pair 11 (Features 8 & 9): Cumulative pilot stop-out latch + multi-day rollover.
-        Verifies stopout threshold is set at ₹8,500 (₹1,500 drawdown on ₹10,000 account)."""
+        Verifies stopout threshold is set at INR 8,500 (INR 1,500 drawdown on INR 10,000 account)."""
         min_equity = min(r.ending_equity for r in self.cached.session_rows)
         self.assertGreater(min_equity, 8500.00)
 
     def test_p12_order_book_depth_and_zero_lookahead_broker(self):
         """Pair 12 (Features 2 & 16): L2 order book depth + Tick[t+1] zero-lookahead fills.
         Verifies that orders fill on next tick with adverse slippage model applied."""
-        self.assertGreater(len(self.cached.trades), 0)
+        buy_trades = [t for t in self.cached.trades if t.side == "BUY"]
+        self.assertGreater(len(buy_trades), 0)
+        for t in buy_trades:
+            self.assertGreater(t.price, 0)
+            self.assertGreater(t.quantity, 0)
+            self.assertLess(t.sl, t.price)
+            self.assertGreater(t.tp, t.price)
 
     def test_p13_time_of_day_filter_and_multi_symbol_feed(self):
         """Pair 13 (Features 3 & 9): Multi-symbol feed + trading window shields.
-        Verifies that multi-symbol ticks outside 09:30-11:00 / 13:30-14:45 are rejected."""
-        self.assertEqual(self.cached.returncode, 0)
+        Verifies that ticks outside 09:30-11:00 / 13:30-14:45 are rejected."""
+        with open(REPO_ROOT / "data" / "sample_nse_ticks.csv", "r", encoding="utf-8") as f:
+            lines = f.readlines()
+        mod_lines = [lines[0]]
+        for line in lines[1:]:
+            parts = line.strip().split(",")
+            ts = int(parts[0]) + 7_200_000_000_000  # Shift by +2 hours to 11:45-12:00 IST
+            parts[0] = str(ts)
+            mod_lines.append(",".join(parts) + "\n")
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".csv", delete=False) as tf:
+            tp = tf.name
+            tf.writelines(mod_lines)
+        try:
+            res = run_engine(tp, extra_args=["--verbose"])
+            self.assertEqual(res.returncode, 0)
+            self.assertEqual(len(res.trades), 0)
+            self.assertTrue(any("OUTSIDE_TRADING_WINDOW" in l for l in res.log_lines))
+        finally:
+            if os.path.exists(tp):
+                os.remove(tp)
 
     def test_p14_tick_precision_and_statutory_paise_rounding(self):
-        """Pair 14 (Features 2 & 11): ₹0.05 tick precision + integer paise accounting.
+        """Pair 14 (Features 2 & 11): INR 0.05 tick precision + integer paise accounting.
         Verifies that all prices in paise yield exact integer math without floating leakage."""
+        self.assertEqual(IndianStatutoryOracle.to_paise(0.05), 5)
         for t in self.cached.trades:
             self.assertGreater(t.price, 0)
+            paise = IndianStatutoryOracle.to_paise(t.price)
+            self.assertIsInstance(paise, int)
+            self.assertAlmostEqual(IndianStatutoryOracle.to_inr(paise), t.price, places=2)
+            if t.taxes > 0:
+                diff = abs((t.gross_pnl - t.taxes) - t.net_pnl)
+                self.assertLess(diff, 0.02)
 
     def test_p15_cli_config_override_and_risk_shields(self):
         """Pair 15 (Features 9 & 14): CLI --config-dir + institutional risk shields.
