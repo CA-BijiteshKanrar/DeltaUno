@@ -1,84 +1,181 @@
-#include "tradeuno/core/types.hpp"
-#include "tradeuno/core/ring_buffer.hpp"
-#include "tradeuno/core/async_logger.hpp"
-#include "tradeuno/core/state_journal.hpp"
-#include "tradeuno/market/order_book.hpp"
-#include "tradeuno/market/csv_feed.hpp"
-#include "tradeuno/market/watchdog.hpp"
-#include "tradeuno/strategy/momentum_breakout.hpp"
-#include "tradeuno/strategy/signal_ingestor.hpp"
-#include "tradeuno/risk/risk_manager.hpp"
-#include "tradeuno/execution/paper_broker.hpp"
-#include "tradeuno/execution/trade_auditor.hpp"
+#include "deltauno/core/async_logger.hpp"
+#include "deltauno/core/config_loader.hpp"
+#include "deltauno/core/ring_buffer.hpp"
+#include "deltauno/core/state_journal.hpp"
+#include "deltauno/core/types.hpp"
+#include "deltauno/execution/paper_broker.hpp"
+#include "deltauno/execution/trade_auditor.hpp"
+#include "deltauno/market/csv_feed.hpp"
+#include "deltauno/market/order_book.hpp"
+#include "deltauno/market/watchdog.hpp"
+#include "deltauno/risk/risk_manager.hpp"
+#include "deltauno/strategy/momentum_breakout.hpp"
+#include "deltauno/strategy/signal_ingestor.hpp"
 
+#include <atomic>
+#include <iomanip>
 #include <iostream>
 #include <memory>
-#include <iomanip>
+#include <sstream>
+#include <string>
+#include <thread>
+#include <unordered_map>
 
-using namespace tradeuno;
+using namespace deltauno;
+
+namespace {
+
+enum class PositionLifecycle : uint8_t {
+    FLAT = 0,
+    PENDING_ENTRY = 1,
+    OPEN = 2,
+    PENDING_EXIT = 3
+};
+
+} // namespace
 
 int main(int argc, char* argv[]) {
     std::string csv_path = "data/sample_nse_ticks.csv";
-    if (argc > 1) {
-        csv_path = argv[1];
+    std::string config_dir = "config";
+    std::string cli_webhook_json;
+    bool realtime_pacing = false;
+    bool verbose_logs = false;
+
+    for (int i = 1; i < argc; ++i) {
+        const std::string arg = argv[i];
+        if (arg == "--csv" && i + 1 < argc) {
+            csv_path = argv[++i];
+        } else if (arg == "--config-dir" && i + 1 < argc) {
+            config_dir = argv[++i];
+        } else if (arg == "--webhook" && i + 1 < argc) {
+            cli_webhook_json = argv[++i];
+        } else if (arg == "--realtime") {
+            realtime_pacing = true;
+        } else if (arg == "--verbose") {
+            verbose_logs = true;
+        } else if (!arg.empty() && arg[0] != '-') {
+            csv_path = arg;
+        }
     }
 
-    // 1. Initialize Non-Blocking Async Logger
-    core::AsyncLogger::instance().init("deltauno.log");
-    LOG_INFO("=================================================");
-    LOG_INFO("   DeltaUno Low-Latency C++ Trading Engine       ");
-    LOG_INFO("   Target: NSE/BSE Equities | Micro-Capital: ₹1,000");
-    LOG_INFO("=================================================");
+    // 1. Initialize Lock-Free Ring-Buffer Async Logger
+    core::AsyncLogger::instance().init(
+        "deltauno.log",
+        verbose_logs ? core::LogLevel::DEBUG : core::LogLevel::INFO);
 
-    // 2. State Journal / Crash Recovery
+    // 2. Load Runtime Configurations (Risk Limits, Liquid Whitelist, Macro Event Calendar)
+    const core::RiskConfig risk_cfg = core::ConfigLoader::load_risk_config(config_dir + "/risk_limits.json");
+    LOG_INFO("=================================================");
+    LOG_INFO("   DeltaUno Low-Latency C++20 Trading Engine     ");
+    {
+        std::ostringstream banner_cap;
+        banner_cap << "   Target: NSE/BSE Equities | Capital: INR "
+                   << std::fixed << std::setprecision(0) << risk_cfg.initial_capital_inr;
+        LOG_INFO(banner_cap.str());
+    }
+    LOG_INFO("=================================================");
+    const auto instruments = core::ConfigLoader::load_instruments(config_dir + "/instruments.json");
+    const auto whitelist = core::ConfigLoader::to_whitelist_set(instruments);
+    const core::MacroCalendar macro_calendar = core::ConfigLoader::load_macro_calendar(config_dir + "/calendar_events.json");
+
+    std::unordered_map<uint32_t, market::OrderBook> books;
+    std::unordered_map<uint32_t, core::Price> tick_sizes_paise;
+    std::unordered_map<std::string, uint32_t> symbol_to_token;
+    for (const auto& inst : instruments) {
+        books.emplace(inst.token, market::OrderBook(inst.token, inst.symbol));
+        tick_sizes_paise.emplace(inst.token, inst.tick_size_paise);
+        symbol_to_token.emplace(inst.symbol, inst.token);
+    }
+
+    // 3. Initialize Risk Manager, Execution Gateway, Watchdog & WAL State Journal
+    risk::RiskManager risk_mgr(risk_cfg);
+    execution::PaperBroker broker(risk_cfg.initial_capital_inr);
+    execution::TradeAuditor trade_auditor(risk_cfg.initial_capital_inr);
+    market::Watchdog watchdog(risk_cfg.heartbeat_timeout_seconds);
+    watchdog.register_alert_callback([](const std::string& alert_msg) {
+        LOG_WARN(alert_msg);
+    });
+
+    {
+        std::ostringstream cfg_msg;
+        cfg_msg << std::fixed << std::setprecision(0)
+                << "Risk Manager active: Capital=" << risk_cfg.initial_capital_inr << " INR"
+                << " | MaxRisk/Trade=" << risk_cfg.max_risk_per_trade_inr << " INR"
+                << " | KillSwitch=" << risk_cfg.max_daily_drawdown_inr << " INR"
+                << " | Whitelist=" << whitelist.size() << " symbols"
+                << " | MacroEvents=" << macro_calendar.size();
+        LOG_INFO(cfg_msg.str());
+    }
+
+    // 4. Crash Recovery via Atomic Write-Ahead State Journal
     core::StateJournal journal("deltauno_state.json");
-    auto recovered_pos = journal.recover_position();
+    core::Position current_position{};
+    core::TradingSignal pending_entry_signal{};
+    PositionLifecycle lifecycle = PositionLifecycle::FLAT;
+    uint64_t next_order_id = 1;
+
+    const auto recovered_pos = journal.recover_position();
     if (recovered_pos.has_value()) {
-        LOG_WARN("CRASH RECOVERY: Found open position for " + std::string(recovered_pos->symbol) +
-                 " Qty: " + std::to_string(recovered_pos->quantity) +
-                 " @ Entry: " + std::to_string(core::to_inr(recovered_pos->avg_entry_price)) + " INR");
+        current_position = *recovered_pos;
+        lifecycle = PositionLifecycle::OPEN;
+        risk_mgr.set_has_active_position(true);
+        broker.restore_open_position(current_position);
+        watchdog.set_has_open_position(true);
+
+        std::ostringstream rec_msg;
+        rec_msg << "CRASH RECOVERY: Restored active position for " << current_position.symbol
+                << " Qty=" << current_position.quantity
+                << " @ Entry=" << std::fixed << std::setprecision(2)
+                << core::to_inr(current_position.avg_entry_price) << " INR"
+                << " | SL=" << core::to_inr(current_position.current_stop_loss)
+                << " | TP=" << core::to_inr(current_position.take_profit);
+        LOG_WARN(rec_msg.str());
     } else {
         LOG_INFO("State Journal clean. No orphaned positions found.");
     }
 
-    // 3. Initialize Risk Manager with ₹1,000 starting capital
-    risk::RiskManager risk_mgr(1000.0, 12.0, 50.0, 500.0);
-    LOG_INFO("Risk Manager active: Capital=1000 INR | MaxRisk/Trade=12 INR | KillSwitch=50 INR");
+    // 5. Initialize Strategy Pipeline & "BS Detector" Signal Ingestor
+    strategy::MomentumBreakoutStrategy momentum_strat(
+        2.5, 0.55, whitelist, 5, risk_cfg.circuit_limit_buffer_pct);
+    strategy::SignalIngestor bs_detector(
+        whitelist, 2.0, risk_cfg.max_15s_volume_burst_multiple, 0.20, risk_cfg.circuit_limit_buffer_pct, 5);
 
-    // 4. Initialize Execution Gateway (Paper Broker)
-    execution::PaperBroker broker(1000.0);
-
-    // 5. Initialize Strategy and BS Detector Ingestor
-    strategy::MomentumBreakoutStrategy momentum_strat(2.0, 0.25);
-    strategy::SignalIngestor bs_detector;
-
-    // 6. Setup Order Book and Tracking State
-    market::OrderBook book(349121, "TATASTEEL");
-    core::Position current_position{};
-    bool in_trade = false;
-    uint64_t next_order_id = 1;
-
-    // 7. Register broker fill callback
+    // 6. Register Execution Gateway Fill Callback
     broker.register_fill_callback([&](const core::Order& order, const core::TradeAuditEntry& audit) {
+        const core::Price tick_step = tick_sizes_paise.count(order.token) ? tick_sizes_paise[order.token] : 5;
+
         if (order.side == core::Side::BUY) {
-            in_trade = true;
+            lifecycle = PositionLifecycle::OPEN;
+            current_position = core::Position{};
             current_position.token = order.token;
-#if defined(_MSC_VER)
-            strncpy_s(current_position.symbol, order.symbol, sizeof(current_position.symbol) - 1);
-#else
-            std::strncpy(current_position.symbol, order.symbol, sizeof(current_position.symbol) - 1);
-#endif
+            core::copy_fixed_str(current_position.symbol, order.symbol);
             current_position.side = core::Side::BUY;
             current_position.quantity = order.filled_quantity;
             current_position.avg_entry_price = order.avg_fill_price;
             current_position.current_price = order.avg_fill_price;
-            current_position.current_stop_loss = static_cast<core::Price>(order.avg_fill_price * 0.990);
+            current_position.peak_favorable_price = order.avg_fill_price;
+            current_position.worst_adverse_price = order.avg_fill_price;
+
+            // Preserve signal SL/TP distances shifted by execution slippage and aligned to NSE tick size
+            if (pending_entry_signal.is_valid && pending_entry_signal.target_entry > 0) {
+                const core::Price sl_dist = pending_entry_signal.target_entry - pending_entry_signal.stop_loss;
+                const core::Price tp_dist = pending_entry_signal.take_profit - pending_entry_signal.target_entry;
+                current_position.current_stop_loss =
+                    core::floor_to_tick(order.avg_fill_price - sl_dist, tick_step);
+                current_position.take_profit =
+                    core::ceil_to_tick(order.avg_fill_price + tp_dist, tick_step);
+            } else {
+                current_position.current_stop_loss = core::floor_to_tick(
+                    static_cast<core::Price>(static_cast<double>(order.avg_fill_price) * 0.990), tick_step);
+                current_position.take_profit = core::ceil_to_tick(
+                    static_cast<core::Price>(static_cast<double>(order.avg_fill_price) * 1.018), tick_step);
+            }
             current_position.initial_stop_loss = current_position.current_stop_loss;
-            current_position.take_profit = static_cast<core::Price>(order.avg_fill_price * 1.018);
             current_position.is_breakeven_set = false;
             current_position.open_time_ns = order.updated_time_ns;
 
             risk_mgr.set_has_active_position(true);
+            watchdog.set_has_open_position(true);
             journal.save_position(current_position);
 
             std::ostringstream ss;
@@ -88,105 +185,268 @@ int main(int argc, char* argv[]) {
                << " | TP=" << core::to_inr(current_position.take_profit);
             LOG_TRADE(ss.str());
         } else if (order.side == core::Side::SELL) {
-            in_trade = false;
+            lifecycle = PositionLifecycle::FLAT;
+            pending_entry_signal = core::TradingSignal{};
             risk_mgr.on_trade_closed(audit);
+            momentum_strat.on_trade_fill(audit);
+            watchdog.set_has_open_position(false);
             journal.clear_position();
+
+            const double total_taxes = audit.stt_inr + audit.exchange_fee_inr + audit.gst_inr +
+                                       audit.stamp_duty_inr + audit.sebi_turnover_inr;
 
             std::ostringstream ss;
             ss << "FILLED SELL: " << order.symbol << " Qty=" << audit.quantity
                << " @ " << std::fixed << std::setprecision(2) << core::to_inr(audit.exit_price) << " INR"
-               << " | Gross PnL: " << (audit.gross_pnl_inr >= 0 ? "+" : "") << audit.gross_pnl_inr << " INR"
-               << " | Taxes: -" << (audit.stt_inr + audit.exchange_fee_inr + audit.gst_inr + audit.stamp_duty_inr) << " INR"
-               << " | Net PnL: " << (audit.net_pnl_inr >= 0 ? "+" : "") << audit.net_pnl_inr << " INR"
+               << " | Gross PnL: " << (audit.gross_pnl_inr >= 0.0 ? "+" : "") << audit.gross_pnl_inr << " INR"
+               << " | Taxes: -" << total_taxes << " INR"
+               << " | Net PnL: " << (audit.net_pnl_inr >= 0.0 ? "+" : "") << audit.net_pnl_inr << " INR"
+               << " | MAE: " << core::to_inr(audit.max_adverse_excursion) << " INR"
+               << " | MFE: " << core::to_inr(audit.max_favorable_excursion) << " INR"
                << " | Balance: " << broker.cash_balance_inr() << " INR";
             LOG_TRADE(ss.str());
         }
     });
 
-    // 8. Market Feed Replayer
-    market::CSVFeed feed(csv_path);
-    LOG_INFO("Connecting to CSV Market Feed: " + csv_path);
+    // Helper to evaluate and submit a validated TradingSignal through the 13-Shield Risk Manager
+    auto try_submit_signal = [&](const core::TradingSignal& sig,
+                                 const market::OrderBook& book,
+                                 uint64_t current_time_ns) {
+        if (lifecycle != PositionLifecycle::FLAT) return;
 
-    feed.register_callback([&](const core::MarketTick& tick) {
-        // Update Order Book
-        book.on_tick(tick);
+        const bool macro_frozen = macro_calendar.is_frozen(current_time_ns);
+        const bool near_circuit = book.is_near_circuit(risk_cfg.circuit_limit_buffer_pct);
 
-        // A. Match pending orders on Tick[t+1] (Zero Look-Ahead Bias)
-        broker.on_next_tick(tick, book);
-
-        // B. If currently in trade, evaluate position risk rules (Trailing stop / profit / 15:05 cutoff)
-        if (in_trade) {
-            auto [should_exit, exit_reason] = risk_mgr.check_position_rules(current_position, tick.last_price, tick.timestamp_ns);
-            if (should_exit) {
-                LOG_INFO("Position Exit Triggered: " + exit_reason + " @ " + std::to_string(core::to_inr(tick.last_price)) + " INR");
-
-                core::Order exit_order{};
-                exit_order.client_order_id = next_order_id++;
-                exit_order.token = current_position.token;
-#if defined(_MSC_VER)
-                strncpy_s(exit_order.symbol, current_position.symbol, sizeof(exit_order.symbol) - 1);
-#else
-                std::strncpy(exit_order.symbol, current_position.symbol, sizeof(exit_order.symbol) - 1);
-#endif
-                exit_order.side = core::Side::SELL;
-                exit_order.type = core::OrderType::MARKET;
-                exit_order.quantity = current_position.quantity;
-                exit_order.created_time_ns = tick.timestamp_ns;
-
-                broker.place_order(exit_order);
-            }
+        const auto [sized_qty, rejection] =
+            risk_mgr.evaluate_and_size_order(sig, current_time_ns, macro_frozen, near_circuit);
+        if (rejection != risk::RiskRejection::NONE) {
+            LOG_DEBUG(std::string("Order rejected by RiskManager: ") + risk::risk_rejection_to_string(rejection));
             return;
         }
 
-        // C. Update strategy with tick
-        momentum_strat.on_tick(tick, book);
+        core::Order new_order{};
+        new_order.client_order_id = next_order_id++;
+        new_order.token = sig.token;
+        core::copy_fixed_str(new_order.symbol, sig.symbol);
+        new_order.side = sig.side;
+        new_order.type = core::OrderType::MARKET;
+        new_order.price = sig.target_entry;
+        new_order.quantity = sized_qty;
+        new_order.created_time_ns = current_time_ns;
 
-        // D. Generate signal
-        auto signal_opt = momentum_strat.generate_signal(book);
-        if (signal_opt.has_value() && signal_opt->is_valid) {
-            const auto& sig = signal_opt.value();
-
-            // Evaluate risk & size order
-            auto [sized_qty, rejection] = risk_mgr.evaluate_and_size_order(sig, tick.timestamp_ns);
-            if (rejection != risk::RiskRejection::NONE) {
-                LOG_DEBUG("Order rejected by RiskManager: " + std::string(risk::risk_rejection_to_string(rejection)));
-                return;
-            }
-
-            // Create Order
-            core::Order new_order{};
-            new_order.client_order_id = next_order_id++;
-            new_order.token = sig.token;
-#if defined(_MSC_VER)
-            strncpy_s(new_order.symbol, sig.symbol, sizeof(new_order.symbol) - 1);
-#else
-            std::strncpy(new_order.symbol, sig.symbol, sizeof(new_order.symbol) - 1);
-#endif
-            new_order.side = sig.side;
-            new_order.type = core::OrderType::MARKET;
-            new_order.price = sig.target_entry;
-            new_order.quantity = sized_qty;
-            new_order.created_time_ns = tick.timestamp_ns;
+        if (broker.place_order(new_order)) {
+            lifecycle = PositionLifecycle::PENDING_ENTRY;
+            pending_entry_signal = sig;
+            risk_mgr.set_has_active_position(true);
 
             std::ostringstream ss;
-            ss << "SIGNAL ACCEPTED: " << sig.symbol << " BUY Qty=" << sized_qty
-               << " @ Target=" << core::to_inr(sig.target_entry) << " INR"
-               << " | OFI=" << std::fixed << std::setprecision(2) << book.composite_ofi();
+            ss << "SIGNAL ACCEPTED ("
+               << (sig.source == core::SignalSource::EXTERNAL_WEBHOOK ? "WEBHOOK" : "MOMENTUM")
+               << "): " << sig.symbol << " BUY Qty=" << sized_qty
+               << " @ Target=" << std::fixed << std::setprecision(2) << core::to_inr(sig.target_entry) << " INR"
+               << " | OFI=" << book.composite_ofi();
             LOG_INFO(ss.str());
+        }
+    };
 
-            // Place order into execution gateway
-            broker.place_order(new_order);
+    // 7. Lock-Free SPSC Ingestion Queues (Market Feed Producer -> Hot Engine Consumer)
+    auto tick_ring = std::make_unique<core::SPSCRingBuffer<core::MarketTick, 4096>>();
+    auto alert_ring = std::make_unique<core::SPSCRingBuffer<core::ExternalAlert, 256>>();
+    std::atomic<bool> producer_done{false};
+    std::atomic<bool> feed_opened{true};
+
+    if (!cli_webhook_json.empty()) {
+        if (auto parsed = strategy::SignalIngestor::parse_webhook_json(cli_webhook_json)) {
+            if (parsed->token == 0 && symbol_to_token.count(parsed->symbol)) {
+                parsed->token = symbol_to_token[parsed->symbol];
+            }
+            (void)alert_ring->push(*parsed);
+        } else {
+            LOG_WARN("Failed to parse --webhook JSON payload; ignoring external alert.");
+        }
+    }
+
+    market::CSVFeed feed(csv_path, realtime_pacing, 5);
+    LOG_INFO("Connecting to CSV Market Feed: " + csv_path);
+
+    feed.register_callback([&](const core::MarketTick& tick) {
+        while (!tick_ring->push(tick)) {
+            std::this_thread::yield();
+        }
+    });
+    feed.register_alert_callback([&](const core::ExternalAlert& alert) {
+        while (!alert_ring->push(alert)) {
+            std::this_thread::yield();
         }
     });
 
-    // 9. Run the feed
-    LOG_INFO("Starting Market Feed Processing...");
-    feed.start();
-    LOG_INFO("Feed replay complete.");
+    watchdog.start_monitoring();
+    LOG_INFO("Starting Market Feed & Lock-Free SPSC Pipeline...");
 
-    // 10. Post-Trade Performance Audit Report
-    auto audit_summary = execution::TradeAuditor::evaluate(broker.trade_history());
-    execution::TradeAuditor::print_report(audit_summary, std::cout);
+    std::thread producer_thread([&]() {
+        if (!feed.start()) {
+            feed_opened.store(false, std::memory_order_release);
+        }
+        producer_done.store(true, std::memory_order_release);
+    });
+
+    // 8. Core Single-Threaded Event Loop (Zero Locks on Hot Trading Path)
+    int64_t current_ist_day = -1;
+
+    while (!producer_done.load(std::memory_order_acquire) || !tick_ring->empty() || !alert_ring->empty()) {
+        bool did_work = false;
+
+        if (auto tick_opt = tick_ring->pop()) {
+            did_work = true;
+            const core::MarketTick& tick = *tick_opt;
+
+            // --- SESSION DAY BOUNDARY ROLLOVER COORDINATION (09:15 IST) ---
+            if (tick.timestamp_ns > 0) {
+                const int64_t tick_ist_day =
+                    static_cast<int64_t>((tick.timestamp_ns / 1'000'000'000ULL + 19800ULL) / 86400ULL);
+                if (current_ist_day != -1 && tick_ist_day != current_ist_day) {
+                    std::ostringstream roll_msg;
+                    roll_msg << "=== SESSION ROLLOVER: Transitioning to IST Day " << tick_ist_day
+                             << " | Carried Portfolio Equity: " << std::fixed << std::setprecision(2)
+                             << broker.cash_balance_inr() << " INR ===";
+                    LOG_INFO(roll_msg.str());
+
+                    // 1. Invariant safety: Assert flat lifecycle and clear any orphaned state
+                    if (lifecycle != PositionLifecycle::FLAT) {
+                        LOG_WARN("OVERNIGHT INVARIANT VIOLATION: Position active across session rollover! Forcing FLAT.");
+                        lifecycle = PositionLifecycle::FLAT;
+                        current_position = core::Position{};
+                        pending_entry_signal = core::TradingSignal{};
+                        journal.clear_position();
+                    }
+
+                    // 2. Coordinated Rollover Dispatch
+                    risk_mgr.check_day_rollover(tick.timestamp_ns);
+                    trade_auditor.on_session_start(tick_ist_day, execution::TradeAuditor::format_ist_date(tick.timestamp_ns));
+                    momentum_strat.reset_daily_session();
+                    for (auto& [tok, book_inst] : books) {
+                        book_inst.reset_daily_session();
+                    }
+                    watchdog.set_has_open_position(false);
+                } else if (current_ist_day == -1) {
+                    risk_mgr.check_day_rollover(tick.timestamp_ns);
+                    trade_auditor.on_session_start(tick_ist_day, execution::TradeAuditor::format_ist_date(tick.timestamp_ns));
+                }
+                current_ist_day = tick_ist_day;
+            }
+            // --- END SESSION ROLLOVER ---
+
+            watchdog.on_tick(tick.timestamp_ns);
+
+            auto [book_it, inserted] = books.try_emplace(tick.token, tick.token, std::string(tick.symbol));
+            market::OrderBook& book = book_it->second;
+
+            // A. Update L2 Order Book & Multi-Horizon OFI
+            book.on_tick(tick);
+
+            // B. Match pending orders strictly on Tick[t+1] (Zero Look-Ahead Bias)
+            broker.on_next_tick(tick, book);
+
+            // C. Always advance strategy rolling volume & VWAP state (even while holding a position!)
+            momentum_strat.on_tick(tick, book);
+
+            // D. Drain any queued external trader webhook alerts once local order book is live
+            while (auto alert_opt = alert_ring->pop()) {
+                const core::ExternalAlert& alert = *alert_opt;
+                const uint32_t tok = (alert.token != 0) ? alert.token : symbol_to_token[alert.symbol];
+                auto b_it = books.find(tok);
+                if (b_it == books.end() || b_it->second.best_ask() <= 0) {
+                    LOG_WARN(std::string("WEBHOOK VETOED [") + alert.symbol + "]: No live L2 book depth");
+                    continue;
+                }
+                const auto [ext_sig, veto] = bs_detector.validate_external_alert(
+                    alert, b_it->second, momentum_strat.latest_volume_multiple(b_it->second.token()));
+                if (veto != strategy::VetoReason::NONE || !ext_sig.has_value()) {
+                    LOG_WARN(std::string("WEBHOOK VETOED [") + alert.symbol + "]: " +
+                             strategy::veto_reason_to_string(veto));
+                } else {
+                    try_submit_signal(*ext_sig, b_it->second, tick.timestamp_ns);
+                }
+            }
+
+            // E. Manage open position (Break-Even Trailing Stop, SL/TP, 15:05 IST Auto-Squareoff Shield)
+            if (lifecycle == PositionLifecycle::OPEN && tick.token == current_position.token) {
+                const bool was_be = current_position.is_breakeven_set;
+                const core::Price tick_step = tick_sizes_paise.count(tick.token) ? tick_sizes_paise[tick.token] : 5;
+                const auto [should_exit, exit_reason] =
+                    risk_mgr.check_position_rules(current_position, tick.last_price, tick.timestamp_ns, tick_step);
+
+                if (!was_be && current_position.is_breakeven_set) {
+                    journal.save_position(current_position);
+                    std::ostringstream be_msg;
+                    be_msg << "BREAKEVEN RATCHETED: " << current_position.symbol
+                           << " SL moved to " << std::fixed << std::setprecision(2)
+                           << core::to_inr(current_position.current_stop_loss) << " INR (Zero-Loss locked)";
+                    LOG_INFO(be_msg.str());
+                }
+
+                if (should_exit) {
+                    std::ostringstream ex_msg;
+                    ex_msg << "Position Exit Triggered: " << exit_reason
+                           << " @ " << std::fixed << std::setprecision(2)
+                           << core::to_inr(tick.last_price) << " INR";
+                    LOG_INFO(ex_msg.str());
+
+                    core::Order exit_order{};
+                    exit_order.client_order_id = next_order_id++;
+                    exit_order.token = current_position.token;
+                    core::copy_fixed_str(exit_order.symbol, current_position.symbol);
+                    exit_order.side = core::Side::SELL;
+                    exit_order.type = core::OrderType::MARKET;
+                    exit_order.quantity = current_position.quantity;
+                    exit_order.created_time_ns = tick.timestamp_ns;
+
+                    if (broker.place_order(exit_order)) {
+                        lifecycle = PositionLifecycle::PENDING_EXIT;
+                    }
+                }
+                continue;
+            }
+
+            // F. Evaluate internal Momentum Breakout Strategy when flat
+            if (lifecycle == PositionLifecycle::FLAT) {
+                if (const auto sig_opt = momentum_strat.generate_signal(book);
+                    sig_opt.has_value() && sig_opt->is_valid) {
+                    try_submit_signal(*sig_opt, book, tick.timestamp_ns);
+                }
+            }
+        }
+
+        if (!did_work) {
+            std::this_thread::yield();
+        }
+    }
+
+    if (producer_thread.joinable()) {
+        producer_thread.join();
+    }
+    watchdog.stop_monitoring();
+
+    if (!feed_opened.load(std::memory_order_acquire)) {
+        LOG_ERROR("Failed to open CSV market feed: " + csv_path);
+        core::AsyncLogger::instance().shutdown();
+        return 1;
+    }
+
+    LOG_INFO("Feed replay complete.");
+    core::AsyncLogger::instance().flush();
+
+    // 9. Post-Trade Performance Audit Report
+    risk_mgr.finalize_session();
+    const auto multi_day_report =
+        trade_auditor.generate_report(broker.trade_history(), risk_mgr.kill_switch_history());
+    std::stringstream report_buf;
+    execution::TradeAuditor::print_multi_day_report(multi_day_report, report_buf);
+    std::cout << report_buf.str();
+    std::string report_line;
+    while (std::getline(report_buf, report_line)) {
+        LOG_INFO(report_line);
+    }
 
     LOG_INFO("Engine shutdown cleanly. DeltaUno session concluded.");
     core::AsyncLogger::instance().shutdown();

@@ -1,36 +1,36 @@
-# TradeUno: Low-Latency C++ Trading Bot Engine
+# DeltaUno: Low-Latency C++20 Trading Bot Engine — Implementation Plan
 
 ## Goal Description
-Build **TradeUno**, a modular, high-performance C++20 algorithmic trading bot engine engineered for capital preservation and disciplined trickle growth on a micro-account of **₹1,000 (~$10)**.
+Build **DeltaUno**, a modular, high-performance **C++20** algorithmic trading engine engineered for capital preservation and disciplined trickle growth on a ring-fenced pilot account of **₹10,000 (~\$115)**.
 
-The system is designed for **Indian Equities (NSE/BSE)** with multi-asset extensibility, providing:
-1. **Paper Trading Simulation Engine** with realistic statutory friction (STT, GST, exchange turnover, stamp duty, slippage) and zero look-ahead bias matching.
-2. **Hybrid Signal Pipeline**: An internal volume breakout & Order Flow Imbalance (OFI) detector combined with a Webhook/Signal Ingestion endpoint to mirror external trader alerts with local validation ("BS Detector").
+Designed for **Indian Equities (NSE/BSE)** with ₹0.05 tick-size precision and multi-asset extensibility, DeltaUno provides:
+1. **High-Fidelity Paper Trading Simulation Engine** with realistic Indian statutory friction (STT, NSE turnover, GST, stamp duty, SEBI fees), Almgren-Chriss adverse slippage, tick-by-tick MAE/MFE excursion tracking, and strict zero look-ahead bias matching ($\text{Tick}[t] \to \text{Tick}[t+1]$).
+2. **Hybrid Lock-Free Signal Pipeline**: Producer-consumer `SPSCRingBuffer` streams feeding an internal multi-level Order Flow Imbalance (OFI) & volume-surge breakout detector alongside an external JSON webhook ingestor ("BS Detector").
 3. **13 Institutional-Grade Risk & Operational Safeguards**:
-   - Zero-Loss Break-Even Trailing Stop
-   - NSE Auto-Squareoff Shield (15:05 IST auto-exit avoiding broker penalty fees)
-   - "BS Detector" (Order book verification of external trader signals)
-   - Dynamic Fixed-Risk Sizing ($Risk \le \text{₹}12$ per trade)
-   - Circuit Band Guard (avoiding 0-liquidity traps near Upper/Lower Circuits)
-   - Crash Recovery State Journal (`state.json` Write-Ahead Logging)
-   - Network Heartbeat Watchdog
-   - Zero-Jitter Lock-Free Async Logger
-   - 100% Backtest-to-Live Code Parity
-   - Zero Look-Ahead Bias Clocking ($Tick[t]$ signals fill on $Tick[t+1]$)
-   - Post-Trade Diagnostic Auditor (MAE, MFE, Friction Drag Ratio)
-   - Macro Event / RBI Volatility Freeze
-   - Strict Separation of Concerns (Strategy $\to$ Risk Engine $\to$ Gateway)
-4. **Execution Gateway**: Abstracted interface starting with the simulated paper broker and ready for zero-brokerage live execution (Shoonya/Finvasia).
+   - Dynamic Fixed-Risk Sizing ($\text{Risk} \le \text{₹}120$ per trade, $\text{Position} \le \text{₹}5,000$)
+   - Net / Peak-to-Trough Daily Drawdown Kill-Switch ($\text{₹}500$ / $5\%$, auto-reset on IST day rollover)
+   - Zero-Loss Break-Even Trailing Stop ($+1.0\%$ trigger $\to \text{Entry} + 0.15\%$ rounded up to ₹0.05 tick)
+   - NSE Auto-Squareoff Shield (15:05 IST auto-exit avoiding ₹50+GST broker squareoff penalties)
+   - Circuit Band Guard (1.5% buffer near Upper/Lower Circuits in both Strategy and `RiskManager`)
+   - Time-of-Day Liquidity Filter (09:30–11:00 and 13:30–14:45 IST)
+   - Zero Look-Ahead Bias State Machine (`FLAT → PENDING_ENTRY → OPEN → PENDING_EXIT`)
+   - Atomic Crash Recovery State Journal (`deltauno_state.json` via `.tmp` + atomic rename, restoring `Position`, `RiskManager`, `PaperBroker`, and `Watchdog`)
+   - Lock-Free MPMC Ring-Buffer Async Logger (off-thread timestamp formatting, C++20 atomic wait/notify)
+   - Dual-Mode Network Heartbeat Watchdog (`steady_clock` live stall monitor + deterministic replay tick-gap detector)
+   - Macro Event Calendar Freeze ($O(1)$ integer UTC-ns check loaded from `config/calendar_events.json`)
+   - Statutory Friction Payoff Pre-Check ($\text{Expected Gain} \ge 2.5\times \text{Total Fees}$)
+   - Post-Trade Diagnostic Auditor (MAE, MFE, Win Rate, Profit Factor, Friction Drag Ratio, exact PnL identity)
+4. **Execution Gateway Abstraction**: `IExecutionGateway` interface supporting `PaperBroker` out of the box and ready for zero-brokerage live adapters (e.g., Shoonya/Finvasia).
 
 ---
 
-## User Review Required
-
-> [!IMPORTANT]
-> **Toolchain Installation**: The Windows environment currently lacks `cmake` and a C++ compiler. As step 1, we will install `cmake` and `mingw` (GCC) via Chocolatey / Winget.
+## Design Decisions & Constraints
 
 > [!NOTE]
-> **Zero-Brokerage Mandate**: Because standard brokers charge ₹20 per trade (4% of a ₹1,000 account round-trip), live trading is targeted strictly for **zero-brokerage brokers** (such as Shoonya/Finvasia). All initial validation runs in our high-fidelity paper engine where statutory taxes and slippage are accurately deducted.
+> **Header-Only Inline C++20 Engine (`deltauno_engine`)**: All core, market, strategy, risk, and execution components are implemented as inline header-only C++20 modules under `include/deltauno/` exposed via a CMake `INTERFACE` target linked with `Threads::Threads`. This maximizes hot-path compiler inlining across template boundaries without cross-TU call overhead.
+
+> [!IMPORTANT]
+> **Zero-Brokerage Mandate**: Standard flat-fee brokers charge ₹20 per order (₹40 round-trip — consuming 33.3% of a ₹120 1R risk unit on every trade). Live execution targets strictly **zero-brokerage gateways**, while `PaperBroker` deducts every statutory tax and adverse market-impact slippage to the paisa.
 
 ---
 
@@ -38,245 +38,124 @@ The system is designed for **Indian Equities (NSE/BSE)** with multi-asset extens
 
 ```mermaid
 flowchart TD
-    subgraph MarketData [Data & Signal Ingestion Layer]
-        CSV[CSV Historical Tick Replayer] --> FeedRouter[Feed Multiplexer]
-        WS[Live WebSocket Feed] --> FeedRouter
-        WH[External Trader Alert Webhook] --> WebhookParser[HTTP / JSON Signal Ingestor]
+    subgraph MarketData ["Data & Signal Ingestion Layer"]
+        CSV["CSV Tick & #ALERT Replayer"] --> TickRing["Lock-Free SPSC Tick Ring Buffer"]
+        WS["Live WebSocket Feed (Extensible)"] --> TickRing
+        WH["CLI / JSON External Webhook"] --> AlertRing["Lock-Free SPSC Alert Ring Buffer"]
     end
 
-    subgraph CoreEngine [Core Trading Engine (C++20)]
-        FeedRouter --> SPSC[Lock-Free SPSC Ring Buffer]
-        WebhookParser --> SPSC
-        SPSC --> OB[L2 Order Book & Depth Imbalance Engine]
-        OB --> BSFilter["BS Detector" Signal Validation]
-        BSFilter --> Strategy[Momentum Breakout & Signal Engine]
-        
-        subgraph RiskShield [Pre-Trade Risk & Operational Guard]
-            Strategy --> MacroGate[Macro Event & RBI Calendar Freeze]
-            MacroGate --> TimeGate[Time-of-Day Filter & 15:05 Cutoff]
-            TimeGate --> CircuitGuard[Circuit Band Liquidity Guard]
-            CircuitGuard --> Sizer[Dynamic Fixed-Risk Sizer <= ₹12]
-            Sizer --> FeeFilter[Fee-to-Payoff Filter > 2.5x]
-            FeeFilter --> TrailingStop[Zero-Loss Break-Even Trailing Stop]
+    subgraph CoreEngine ["Core Single-Threaded Trading Loop (C++20)"]
+        TickRing --> Watchdog["Dual-Mode Watchdog (5s Timeout)"]
+        TickRing --> OB["5-Level L2 Order Book & Multi-Horizon OFI"]
+        AlertRing --> BSFilter["Signal Ingestor ('BS Detector')"]
+        OB --> BSFilter
+        OB --> Strategy["Momentum Breakout Strategy (Vol >= 2.5x, OFI >= 0.55)"]
+
+        subgraph RiskShield ["13-Shield Pre-Trade & Position Risk Manager"]
+            Strategy --> RiskEval["Kill-Switch, Macro Freeze, Circuit & Time Gates"]
+            BSFilter --> RiskEval
+            RiskEval --> Sizer["Fixed-Risk Sizer (<= ₹120 Risk, <= ₹5,000 Value)"]
+            Sizer --> FeeGate["Statutory Friction Pre-Check (>= 2.5x Fees)"]
+            FeeGate --> PosRules["Break-Even Trailing Stop & 15:05 IST Squareoff"]
         end
     end
 
-    subgraph StorageAndTelemetry [Zero-Jitter Storage & Telemetry]
-        RiskShield --> WAL[Write-Ahead State Journal / Crash Recovery]
-        CoreEngine -.-> AsyncLog[Lock-Free Async Ring-Buffer Logger]
-        Execution --> Auditor[Post-Trade Auditor: MAE, MFE, Friction Ratio]
+    subgraph Execution ["Execution Gateway"]
+        PosRules --> Gateway["IExecutionGateway"]
+        Gateway --> PaperBroker["PaperBroker (Tick[t+1] Fill, Slippage, Taxes, MAE/MFE)"]
+        Gateway -.-> LiveBroker["Zero-Brokerage Live API"]
     end
 
-    subgraph Execution [Execution Gateway]
-        RiskShield --> Gateway[Execution Gateway Interface]
-        Gateway --> PaperBroker[Paper Trading Engine\n(Tick[t+1] Matching, Slippage & Taxes)]
-        Gateway -.-> LiveBroker[Shoonya Zero-Brokerage API]
+    subgraph Telemetry ["Zero-Jitter Storage & Auditing"]
+        PaperBroker --> WAL["Atomic StateJournal (.tmp + rename)"]
+        PaperBroker --> Auditor["TradeAuditor (Exact PnL Identity, MAE/MFE)"]
+        CoreEngine -.-> AsyncLog["Lock-Free MPMC AsyncLogger (deltauno.log)"]
     end
-
-    PaperBroker --> Account[Account Tracker & PnL Ledger]
-    Account -.-> RiskShield
 ```
 
 ---
 
-## Detailed Directory & Component Structure
+## Directory & Component Structure
 
-```
-tradeUno/
+```text
+DeltaUno/
 ├── CMakeLists.txt
+├── README.md
 ├── config/
-│   ├── risk_limits.json           # ₹1,000 capital limits, max loss, cutoff times
-│   ├── instruments.json           # Whitelist of liquid NSE stocks under ₹1,000
-│   └── calendar_events.json       # Macro event freeze schedule (RBI, budget, etc.)
+│   ├── risk_limits.json           # Capital, drawdown, trading windows, cutoffs
+│   ├── instruments.json           # Liquid NSE equity whitelist & tick sizes
+│   └── calendar_events.json       # RBI, Union Budget, and FOMC freeze windows
+├── docs/
+│   ├── implementation_plan.md
+│   └── walkthrough.md
 ├── include/
-│   └── tradeuno/
+│   └── deltauno/
 │       ├── core/
-│       │   ├── types.hpp          # Price, Qty, Tick, Order, AssetClass, Side
-│       │   ├── ring_buffer.hpp    # Cache-aligned lock-free SPSC queue
-│       │   ├── async_logger.hpp   # Non-blocking async logger
-│       │   └── state_journal.hpp  # Write-Ahead crash recovery journal
+│       │   ├── types.hpp          # Fixed-point Price, 5p tick rounding, POD types
+│       │   ├── ring_buffer.hpp    # Cache-aligned SPSCRingBuffer & MPMCRingBuffer
+│       │   ├── async_logger.hpp   # Lock-free async logger with off-thread formatting
+│       │   ├── state_journal.hpp  # Atomic .tmp + rename crash recovery journal
+│       │   └── config_loader.hpp  # Runtime JSON config & IST civil-time loader
 │       ├── market/
-│       │   ├── order_book.hpp     # Fast L2 depth book & OFI calculation
-│       │   ├── feed_interface.hpp # Base feed interface for backtest & live
-│       │   ├── csv_feed.hpp       # Deterministic tick replayer
-│       │   └── watchdog.hpp       # Network heartbeat watchdog timer
+│       │   ├── order_book.hpp     # 5-level L2 book, weighted OFI & microprice
+│       │   ├── feed_interface.hpp # IMarketFeed & alert callback interfaces
+│       │   ├── csv_feed.hpp       # Deterministic CSV tick & #ALERT replayer
+│       │   └── watchdog.hpp       # Steady-clock & deterministic tick-gap monitor
 │       ├── strategy/
 │       │   ├── strategy_interface.hpp
-│       │   ├── momentum_breakout.hpp # Volume acceleration & micro-breakout
-│       │   └── signal_ingestor.hpp   # Webhook/alert receiver with "BS detector"
+│       │   ├── momentum_breakout.hpp # Rolling volume surge, composite OFI & VWAP
+│       │   └── signal_ingestor.hpp   # JSON webhook parser & L2 "BS Detector"
 │       ├── risk/
-│       │   └── risk_manager.hpp   # All 13 risk guards, friction filter, trailing SL
+│       │   └── risk_manager.hpp   # All 13 pre-trade & active-position guards
 │       └── execution/
 │           ├── execution_interface.hpp
-│           ├── paper_broker.hpp   # Matching engine with STT/GST/Slippage
-│           └── trade_auditor.hpp  # MAE, MFE, Friction Drag Ratio calculator
+│           ├── paper_broker.hpp   # Tick[t+1] matching, slippage, taxes & MAE/MFE
+│           └── trade_auditor.hpp  # MAE/MFE & PnL identity performance reporter
 ├── src/
-│   ├── main.cpp                   # Engine entry point & orchestration
-│   ├── core/
-│   │   ├── async_logger.cpp
-│   │   └── state_journal.cpp
-│   ├── market/
-│   │   ├── order_book.cpp
-│   │   └── csv_feed.cpp
-│   ├── strategy/
-│   │   ├── momentum_breakout.cpp
-│   │   └── signal_ingestor.cpp
-│   ├── risk/
-│   │   └── risk_manager.cpp
-│   └── execution/
-│       ├── paper_broker.cpp
-│       └── trade_auditor.cpp
+│   └── main.cpp                   # SPSC pipeline & lifecycle state-machine orchestrator
 ├── data/
-│   └── sample_nse_ticks.csv       # Sample high-frequency NSE market depth data
+│   ├── sample_nse_ticks.csv
+│   └── chop_ticks.csv
+├── scripts/
+│   └── generate_nse_ticks.py      # Deterministic ₹0.05-tick NSE scenario generator
 └── tests/
+    ├── test_macros.hpp
     ├── test_order_book.cpp
+    ├── test_signal_ingestor.cpp
     ├── test_risk_manager.cpp
     ├── test_state_journal.cpp
-    ├── test_trade_auditor.cpp
-    └── test_paper_broker.cpp
+    ├── test_paper_broker.cpp
+    └── test_trade_auditor.cpp
 ```
 
 ---
 
-## Component Details
+## Component Specifications
 
-### 1. Build System & Toolchain Setup
+### 1. Core Layer (`include/deltauno/core/`)
+- **`types.hpp`**: Paise fixed-point `Price` (`int64_t`), NSE ₹0.05 tick alignment helpers (`round_to_tick`, `ceil_to_tick`, `floor_to_tick`), safe `copy_fixed_str`, and trivially copyable `MarketTick`, `ExternalAlert`, `Order`, `Position`, and `TradeAuditEntry`.
+- **`ring_buffer.hpp`**: Cache-line aligned (`64B`) `SPSCRingBuffer` with cached head/tail indices for single-producer market/webhook ingestion, plus bounded lock-free Vyukov `MPMCRingBuffer` for multi-thread telemetry.
+- **`async_logger.hpp`**: Hot-path `log()` records integer epoch ms and fixed `char[384]` into `MPMCRingBuffer` with C++20 `std::atomic::notify_one()`, deferring `localtime` and stream formatting entirely to the background worker thread.
+- **`state_journal.hpp`**: Serializes active `Position` to `deltauno_state.json.tmp` and atomically renames to `deltauno_state.json`.
+- **`config_loader.hpp`**: Loads `risk_limits.json`, `instruments.json`, and `calendar_events.json`, converting IST `YYYY-MM-DD HH:MM:SS` freeze windows to UTC nanosecond intervals via C++20 `<chrono>` civil calendar math.
 
-#### [NEW] `CMakeLists.txt`
-Configures modern C++20 build target, strict compiler warnings (`-Wall -Wextra -Wpedantic`), thread support (`pthread`), and optimization flags (`-O3 -march=native`).
+### 2. Market Layer (`include/deltauno/market/`)
+- **`order_book.hpp`**: Tracks 5-level Bid/Ask queues, spread, mid-price, weighted microprice, 1.5% circuit proximity, and multi-level exponentially level-weighted OFI (`{1.0, 0.7, 0.5, 0.35, 0.25}`) blended across horizons 1, 5, and 20.
+- **`csv_feed.hpp` & `watchdog.hpp`**: Replays tick streams and optional `#ALERT` lines; `Watchdog` tracks live `steady_clock` heartbeats separately from market epoch timestamps while checking deterministic tick gaps during backtests.
 
----
-
-### 2. Core Architecture & Types (`include/tradeuno/core/`)
-
-#### [NEW] `include/tradeuno/core/types.hpp`
-Defines zero-heap-allocation, cache-aligned core types:
-- `Price`: Fixed-point integer in paise (1 INR = 100 paise) to eliminate IEEE-754 float precision errors.
-- `Quantity`: Unsigned integer shares.
-- `AssetClass`: `EQUITY_CASH`, `EQUITY_INTRADAY_MARGIN`, `EQUITY_FUTURES`.
-- `MarketTick`: Timestamp, symbol token, LTP, total volume, top 5 bid/ask levels (price & quantity), upper/lower circuit limits.
-- `Order`: Client ID, symbol, side, order type, price, qty, status, filled qty, avg price.
-- `TradeAuditEntry`: Order IDs, fill timestamp, fill price, exit price, MAE (Max Adverse Excursion), MFE (Max Favorable Excursion), statutory taxes breakdown, gross PnL, net PnL.
-
-#### [NEW] `include/tradeuno/core/ring_buffer.hpp`
-Single-Producer Single-Consumer (SPSC) lock-free ring buffer for passing ticks and external signals with sub-microsecond latency.
-
-#### [NEW] `include/tradeuno/core/async_logger.hpp`
-Background consumer thread writing log entries to disk and stdout without blocking the trading hot path.
-
-#### [NEW] `include/tradeuno/core/state_journal.hpp`
-Write-Ahead Logging (WAL) state manager that flushes open positions and active orders to `state.json`. On engine startup, it recovers active trades to prevent orphaned positions after a crash.
-
----
-
-### 3. Market Depth & Data Feed (`include/tradeuno/market/`)
-
-#### [NEW] `include/tradeuno/market/order_book.hpp`
-Fast, static-array based Level 2 order book:
-- Tracks top 5 Bid & Ask depth levels.
-- Calculates weighted mid-price and bid-ask spread.
-- Computes Order Flow Imbalance (OFI):
-  $$\text{OFI} = \Delta \text{BidSize} - \Delta \text{AskSize}$$
-
-#### [NEW] `include/tradeuno/market/csv_feed.hpp`
-High-speed tick replayer reading timestamped CSV files with full depth.
-
-#### [NEW] `include/tradeuno/market/watchdog.hpp`
-Monitors time elapsed since the last tick received. If > 5 seconds during active trading hours with an open position, triggers an emergency alert.
-
----
-
-### 4. Strategy & Signal Pipeline (`include/tradeuno/strategy/`)
-
-#### [NEW] `include/tradeuno/strategy/momentum_breakout.hpp`
-- Calculates 20-period moving average volume.
-- Detects volume expansion $> 2.5\times$ moving average with price crossing above VWAP / local resistance.
-- Whitelist check: Restricts trading to approved liquid NSE stocks under ₹1,000 (e.g. TATASTEEL, SBIN, ITC, COALINDIA, ZOMATO).
-
-#### [NEW] `include/tradeuno/strategy/signal_ingestor.hpp` & "BS Detector"
-- Receives external trader alerts (via JSON).
-- Passes the alert through the **BS Detector**:
-  1. Checks if current volume is elevated.
-  2. Confirms Order Flow Imbalance (OFI) is positive.
-  3. Rejects if price already surged $> 2\%$ in the last 60 seconds (prevents buying at the peak of a pump).
-
----
-
-### 5. Risk Management Engine (`include/tradeuno/risk/`)
-
-#### [NEW] `include/tradeuno/risk/risk_manager.hpp`
-Enforces the complete suite of capital protection rules:
-- **Capital Bound**: Account capital initialized at ₹1,000.
-- **Dynamic Fixed-Risk Sizing**:
-  $$\text{Quantity} = \min\left(\left\lfloor \frac{\text{₹}12}{\text{Entry} - \text{SL}} \right\rfloor, \left\lfloor \frac{\text{₹}500}{\text{Entry}} \right\rfloor\right)$$
-- **Zero-Loss Break-Even Trailing**: When profit $\ge +1\%$, SL is moved to $\text{Entry} + \text{Estimated Taxes}$.
-- **Daily Drawdown Kill-Switch**: Halts all new orders if daily drawdown reaches **₹50 (5%)**.
-- **Time-of-Day Filter**: Allows entries only during **09:30–11:00** and **13:30–14:45 IST**.
-- **Auto-Squareoff Shield**: Forcibly exits all open intraday positions at **15:05 IST** (avoiding the broker's ₹50 penalty).
-- **Circuit Band Guard**: Vetoes orders if price is within 1.5% of Upper or Lower Circuit.
-- **Macro Event Freeze**: Rejects entries during scheduled high-impact event windows.
-- **Statutory Friction Filter**: Calculates estimated STT, GST, turnover, stamp duty. Rejects any trade where expected profit $< 2.5\times$ fees.
-
----
-
-### 6. Execution & Paper Broker (`include/tradeuno/execution/`)
-
-#### [NEW] `include/tradeuno/execution/paper_broker.hpp`
-High-fidelity simulated exchange matching engine:
-- **Zero Look-Ahead Bias**: Orders placed on $Tick[t]$ fill on $Tick[t+1]$ at opposite best bid/ask.
-- Simulates realistic 10ms execution latency and slippage.
-- Accurately computes statutory charges:
-  - STT: 0.025% on intraday sell value.
-  - Exchange Turnover Fee: 0.00345% of turnover.
-  - GST: 18% on (brokerage + turnover fee).
-  - Stamp Duty: 0.003% on buy value.
-  - SEBI Charges: ₹10 per crore of turnover.
-
-#### [NEW] `include/tradeuno/execution/trade_auditor.hpp`
-Post-trade diagnostic evaluator:
-- Computes **MAE (Maximum Adverse Excursion)** and **MFE (Maximum Favorable Excursion)** per trade.
-- Calculates **Friction Drag Ratio**:
-  $$\text{Friction Ratio} = \frac{\text{Total Taxes \& Charges}}{\text{Gross Profit}}$$
-- Computes Expectancy, Win Rate, and Profit Factor.
-
----
-
-### 7. Engine Entry Point
-
-#### [NEW] `src/main.cpp`
-Orchestrates:
-1. State recovery check via `StateJournal`.
-2. Initializing `RiskManager` with ₹1,000 capital.
-3. Loading liquid instrument whitelist and event calendar.
-4. Starting background async logger.
-5. Starting market feed replayer and event loop.
-6. Printing end-of-run performance audit report (Win Rate, Profit Factor, Gross PnL, Total Taxes & Friction, Net PnL, Max Drawdown, MAE/MFE statistics).
+### 3. Strategy, Risk & Execution Layers
+- **`momentum_breakout.hpp`**: Continuously updates session VWAP and 20-tick volume deltas (including while in an open position to prevent post-exit volume spikes); triggers when volume $\ge 2.5\times$ MA, composite OFI $\ge 0.55$, and `best_bid >= VWAP`.
+- **`signal_ingestor.hpp`**: Parses JSON alerts and enforces whitelist membership, long-only direction, local `OFI >= 0.20`, price surge $\le 2.0\%$, volume burst $\le 4.0\times$, and circuit distance $> 1.5\%$.
+- **`risk_manager.hpp`**: Enforces net/peak-to-trough ₹500 daily drawdown with IST day rollover reset, macro freeze, circuit guard, active windows, ₹120 risk sizing, 2.5x fee filter, ₹0.05-aligned zero-loss break-even trailing stop, and 15:05 IST auto-squareoff.
+- **`paper_broker.hpp` & `trade_auditor.hpp`**: Enforces `Tick[t+1]` fills, duplicate-order protection, crash-recovery position restoration, `ceil`/`floor` adverse slippage, full NSE statutory charges, tick-by-tick MAE/MFE capture, and exact gross/net PnL accounting across win, loss, and ±₹0.05 scratch trades.
 
 ---
 
 ## Verification Plan
 
-### Automated Tests
-1. **Risk Engine Invariant Tests** (`tests/test_risk_manager.cpp`):
-   - Test that single trade loss never exceeds ₹12.
-   - Test that daily drawdown kill-switch engages at -₹50.
-   - Test that trades between 11:30–13:30 IST and after 15:00 IST are rejected.
-   - Test that circuit band guard rejects trades near price band limits.
-   - Test that break-even trailing stop activates at +1% profit.
-   - Test macro event freeze blocks trades during event windows.
-2. **Order Book & BS Detector Tests** (`tests/test_order_book.cpp`):
-   - Test depth parsing, OFI calculation, and pump-and-dump signal veto.
-3. **Paper Broker & Tax Tests** (`tests/test_paper_broker.cpp`):
-   - Test exact penny-accurate calculation of STT, GST, turnover, stamp duty.
-   - Verify tick $t+1$ execution order without look-ahead bias.
-4. **Crash Recovery Tests** (`tests/test_state_journal.cpp`):
-   - Simulate a crash with an open position, restart engine, verify state recovery.
-5. **Trade Auditor Tests** (`tests/test_trade_auditor.cpp`):
-   - Validate MAE, MFE, and friction drag ratio calculations.
-
-### Manual Verification
-1. Run `tradeuno` in backtest mode using `data/sample_nse_ticks.csv`.
-2. Inspect the generated terminal and file log:
-   - Verify all trades comply with risk sizing.
-   - Verify that 15:05 auto-squareoff successfully closed positions.
-   - Verify final net balance, fee breakdown, and trade ledger.
+1. **`OrderBookTest`** (`tests/test_order_book.cpp`): L2 depth, spread, microprice, multi-level OFI, upper/lower circuit guard, and 20,000-message multi-threaded `SPSCRingBuffer` test.
+2. **`SignalIngestorTest`** (`tests/test_signal_ingestor.cpp`): JSON webhook parsing, tighter SL preservation, and all BS Detector vetoes (whitelist, short-side, ask-dumping OFI, >2% price pump, >4x volume climax, upper circuit).
+3. **`RiskManagerTest`** (`tests/test_risk_manager.cpp`): Fixed-risk & ₹5,000 sizing caps, net/peak-to-trough drawdown kill-switch with IST next-day rollover reset, time-of-day windows, circuit & macro event freezes, 15:05 squareoff, friction veto, and ₹0.05-aligned breakeven trailing stop.
+4. **`StateJournalTest`** (`tests/test_state_journal.cpp`): Atomic `.tmp` + rename persistence, reboot restoration into `PaperBroker`, post-recovery SELL execution with preserved pre-crash MAE, and `Watchdog` deterministic tick-gap alerts.
+5. **`PaperBrokerTest`** (`tests/test_paper_broker.cpp`): Zero look-ahead `Tick[t+1]` matching, duplicate order guards, adverse slippage, NSE statutory fees, and MAE/MFE excursion recording.
+6. **`TradeAuditorTest`** (`tests/test_trade_auditor.cpp`): Exact `Gross Profit - Gross Loss - Friction == Net PnL` identity across winning, losing, and near-breakeven trades.
