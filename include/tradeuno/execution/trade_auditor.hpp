@@ -75,7 +75,7 @@ public:
 
     static void print_report(const AuditSummary& s, std::ostream& out = std::cout) {
         out << "\n============================================================\n";
-        out << "              TRADEUNO PERFORMANCE AUDIT REPORT             \n";
+        out << "              DELTAUNO PERFORMANCE AUDIT REPORT             \n";
         out << "============================================================\n";
         out << std::fixed << std::setprecision(2);
         out << "  Total Completed Trades    : " << s.total_trades << "\n";

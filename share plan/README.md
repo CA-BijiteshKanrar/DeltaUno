@@ -1,4 +1,4 @@
-# TradeUno: Low-Latency C++ Trading Bot Engine
+# DeltaUno: Low-Latency C++ Trading Bot Engine
 
 A modular, high-performance **C++20 algorithmic trading engine** engineered for capital preservation and disciplined trickle compounding on a micro-account (**₹1,000 / ~$10**).
 

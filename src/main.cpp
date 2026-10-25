@@ -24,14 +24,14 @@ int main(int argc, char* argv[]) {
     }
 
     // 1. Initialize Non-Blocking Async Logger
-    core::AsyncLogger::instance().init("tradeuno.log");
+    core::AsyncLogger::instance().init("deltauno.log");
     LOG_INFO("=================================================");
-    LOG_INFO("   TradeUno Low-Latency C++ Trading Engine       ");
+    LOG_INFO("   DeltaUno Low-Latency C++ Trading Engine       ");
     LOG_INFO("   Target: NSE/BSE Equities | Micro-Capital: ₹1,000");
     LOG_INFO("=================================================");
 
     // 2. State Journal / Crash Recovery
-    core::StateJournal journal("tradeuno_state.json");
+    core::StateJournal journal("deltauno_state.json");
     auto recovered_pos = journal.recover_position();
     if (recovered_pos.has_value()) {
         LOG_WARN("CRASH RECOVERY: Found open position for " + std::string(recovered_pos->symbol) +
@@ -188,7 +188,7 @@ int main(int argc, char* argv[]) {
     auto audit_summary = execution::TradeAuditor::evaluate(broker.trade_history());
     execution::TradeAuditor::print_report(audit_summary, std::cout);
 
-    LOG_INFO("Engine shutdown cleanly. TradeUno session concluded.");
+    LOG_INFO("Engine shutdown cleanly. DeltaUno session concluded.");
     core::AsyncLogger::instance().shutdown();
 
     return 0;

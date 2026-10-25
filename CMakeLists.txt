@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(TradeUno VERSION 1.0.0 LANGUAGES CXX)
+project(DeltaUno VERSION 1.0.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -13,8 +13,8 @@ endif()
 
 include_directories(include)
 
-# Main TradeUno Executable
-add_executable(tradeuno
+# Main DeltaUno Executable
+add_executable(deltauno
     src/main.cpp
 )
 

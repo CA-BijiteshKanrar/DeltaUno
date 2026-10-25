@@ -1,8 +1,8 @@
-# TradeUno Implementation & Verification Walkthrough
+# DeltaUno Implementation & Verification Walkthrough
 
 ## Summary of Accomplishments
 
-We have successfully engineered and verified **TradeUno**: a low-latency, high-performance **C++20 algorithmic trading engine** built from the ground up for micro-capital preservation (**₹1,000 / ~$10**) on **Indian Equities (NSE/BSE)** with multi-asset extensibility.
+We have successfully engineered and verified **DeltaUno**: a low-latency, high-performance **C++20 algorithmic trading engine** built from the ground up for micro-capital preservation (**₹1,000 / ~$10**) on **Indian Equities (NSE/BSE)** with multi-asset extensibility.
 
 ---
 
