@@ -49,15 +49,21 @@ struct SymbolIndicatorState {
 class MomentumBreakoutStrategy : public IStrategy {
 public:
     explicit MomentumBreakoutStrategy(double volume_surge_multiple = 2.5,
-                                      double min_composite_ofi = 0.55,
+                                      double min_composite_ofi = 0.70,
                                       std::unordered_set<std::string> whitelist = {},
                                       core::Price tick_size_paise = 5,
-                                      double circuit_buffer_pct = 1.5)
+                                      double circuit_buffer_pct = 1.5,
+                                      double take_profit_pct = 1.05,
+                                      double stop_loss_pct = 1.00,
+                                      double min_bid_depth_ratio = 1.80)
         : volume_surge_multiple_(volume_surge_multiple),
           min_composite_ofi_(min_composite_ofi),
           whitelist_(std::move(whitelist)),
           tick_size_paise_(tick_size_paise),
-          circuit_buffer_pct_(circuit_buffer_pct) {
+          circuit_buffer_pct_(circuit_buffer_pct),
+          take_profit_pct_(take_profit_pct),
+          stop_loss_pct_(stop_loss_pct),
+          min_bid_depth_ratio_(min_bid_depth_ratio) {
         if (whitelist_.empty()) {
             whitelist_ = {"TATASTEEL", "SBIN", "ITC", "COALINDIA", "ZOMATO"};
         }
@@ -116,16 +122,20 @@ public:
         const double ofi = book.composite_ofi();
         const bool has_ofi_support = (ofi >= min_composite_ofi_);
 
-        // 3. Check VWAP Alignment (per symbol)
+        // 3. Check Order Book Depth Imbalance (institutional queue absorption)
+        const double depth_ratio = book.top5_bid_to_ask_depth_ratio();
+        const bool has_depth_support = (depth_ratio >= min_bid_depth_ratio_);
+
+        // 4. Check VWAP Alignment (per symbol)
         const core::Price vwap = state.get_vwap();
         const bool is_above_vwap = (vwap == 0) || (book.best_bid() >= vwap);
 
-        // 4. Circuit proximity veto
+        // 5. Circuit proximity veto
         if (book.is_near_circuit(circuit_buffer_pct_)) {
             return std::nullopt;
         }
 
-        if (has_volume_surge && has_ofi_support && is_above_vwap && book.best_ask() > 0) {
+        if (has_volume_surge && has_ofi_support && has_depth_support && is_above_vwap && book.best_ask() > 0) {
             core::TradingSignal sig{};
             sig.timestamp_ns = book.last_tick_time_ns();
             sig.token = token;
@@ -133,9 +143,11 @@ public:
             sig.side = core::Side::BUY;
             sig.target_entry = book.best_ask();
 
-            // Set Stop Loss at ~1.0% below entry and Take Profit at ~1.8% above entry (1:1.8 R:R), aligned to NSE tick size
-            const auto raw_sl = static_cast<core::Price>(static_cast<double>(sig.target_entry) * 0.990);
-            const auto raw_tp = static_cast<core::Price>(static_cast<double>(sig.target_entry) * 1.018);
+            // Set Stop Loss and Take Profit aligned to NSE tick size
+            const auto raw_sl = static_cast<core::Price>(
+                static_cast<double>(sig.target_entry) * (1.0 - stop_loss_pct_ / 100.0));
+            const auto raw_tp = static_cast<core::Price>(
+                static_cast<double>(sig.target_entry) * (1.0 + take_profit_pct_ / 100.0));
             sig.stop_loss = core::floor_to_tick(raw_sl, tick_size_paise_);
             sig.take_profit = core::ceil_to_tick(raw_tp, tick_size_paise_);
 
@@ -212,12 +224,20 @@ public:
         return symbol_states_;
     }
 
+    [[nodiscard]] double take_profit_pct() const noexcept { return take_profit_pct_; }
+    [[nodiscard]] double stop_loss_pct() const noexcept { return stop_loss_pct_; }
+    [[nodiscard]] double min_composite_ofi() const noexcept { return min_composite_ofi_; }
+    [[nodiscard]] double min_bid_depth_ratio() const noexcept { return min_bid_depth_ratio_; }
+
 private:
     double volume_surge_multiple_{2.5};
-    double min_composite_ofi_{0.55};
+    double min_composite_ofi_{0.70};
     std::unordered_set<std::string> whitelist_;
     core::Price tick_size_paise_{5};
     double circuit_buffer_pct_{1.5};
+    double take_profit_pct_{1.05};
+    double stop_loss_pct_{1.00};
+    double min_bid_depth_ratio_{1.80};
 
     std::unordered_map<uint32_t, SymbolIndicatorState> symbol_states_;
     std::unordered_map<std::string, uint32_t> symbol_to_token_;

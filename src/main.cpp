@@ -136,7 +136,14 @@ int main(int argc, char* argv[]) {
 
     // 5. Initialize Strategy Pipeline & "BS Detector" Signal Ingestor
     strategy::MomentumBreakoutStrategy momentum_strat(
-        2.5, 0.55, whitelist, 5, risk_cfg.circuit_limit_buffer_pct);
+        2.5,
+        risk_cfg.min_composite_ofi,
+        whitelist,
+        5,
+        risk_cfg.circuit_limit_buffer_pct,
+        risk_cfg.take_profit_pct,
+        risk_cfg.stop_loss_pct,
+        risk_cfg.min_bid_depth_ratio);
     strategy::SignalIngestor bs_detector(
         whitelist, 2.0, risk_cfg.max_15s_volume_burst_multiple, 0.20, risk_cfg.circuit_limit_buffer_pct, 5);
 
