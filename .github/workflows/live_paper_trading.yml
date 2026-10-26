@@ -42,6 +42,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: deltauno-live-nse-session
+  cancel-in-progress: false
+
 jobs:
   live-paper-trading:
     name: Dual-Mode Live Paper Trading (Track A + Track B)

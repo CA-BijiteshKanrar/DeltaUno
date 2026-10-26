@@ -897,16 +897,20 @@ def main() -> int:
         stop_requested = True
 
     signal.signal(signal.SIGINT, sigint_handler)
+    if hasattr(signal, "SIGTERM"):
+        signal.signal(signal.SIGTERM, sigint_handler)
 
     start_monotonic = time.monotonic()
     last_heartbeat = 0.0
+    init_ist = datetime.now(TZ_IST)
+    started_before_close = init_ist.hour < 15 or (init_ist.hour == 15 and init_ist.minute < 30)
 
     try:
         with open(live_csv, "a", encoding="utf-8", newline="\n") as f:
             while not stop_requested and proc.poll() is None:
                 now_ist = datetime.now(TZ_IST)
-                # Automatically end session at 15:30:05 IST
-                if not args.start_now and (now_ist.hour > 15 or (now_ist.hour == 15 and now_ist.minute >= 30)):
+                # Automatically end session at 15:30:00 IST if started before market close
+                if started_before_close and (now_ist.hour > 15 or (now_ist.hour == 15 and now_ist.minute >= 30)):
                     print("\n[MARKET CLOSE] 15:30 IST reached. Closing live session cleanly...", flush=True)
                     break
 
