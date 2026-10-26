@@ -300,22 +300,36 @@ class LiveQuoteProvider:
     def _fetch_upstox(self) -> List[str]:
         access_token = os.environ["UPSTOX_ACCESS_TOKEN"]
         keys = ",".join(inst["upstox_key"] for inst in INSTRUMENTS)
-        url = f"https://api.upstox.com/v2/market-quote/quotes?instrument_key={urllib.parse.quote(keys)}"
+        url = f"https://api.upstox.com/v2/market-quote/quotes?instrument_key={urllib.parse.quote(keys, safe=',')}"
         req = urllib.request.Request(
             url,
             headers={
                 "Accept": "application/json",
                 "Authorization": f"Bearer {access_token}",
+                "User-Agent": "DeltaUno/1.0",
             },
         )
         ts_ns = time.time_ns()
         lines = []
         with urllib.request.urlopen(req, timeout=4.0) as resp:
             payload = json.loads(resp.read().decode("utf-8")).get("data", {})
+        
+        # Index payload by instrument_token (e.g. "NSE_EQ|INE...") and symbol
+        by_token = {}
+        for k, v in payload.items():
+            if isinstance(v, dict):
+                tok = v.get("instrument_token", "")
+                sym = v.get("symbol", "")
+                if tok:
+                    by_token[tok] = v
+                if sym:
+                    by_token[sym] = v
+                by_token[k] = v
+
         for inst in INSTRUMENTS:
-            # Upstox keys in response use ':' instead of '|'
-            alt_key = inst["upstox_key"].replace("|", ":")
-            q = payload.get(inst["upstox_key"]) or payload.get(alt_key)
+            q = by_token.get(inst["upstox_key"]) or by_token.get(inst["symbol"])
+            if not q and inst["symbol"] == "ZOMATO":
+                q = by_token.get("ETERNAL")
             if not q:
                 continue
             ltp = float(q.get("last_price", inst["ref_price"]))
