@@ -24,6 +24,7 @@ import argparse
 import base64
 import hashlib
 import hmac
+import http.client
 import json
 import math
 import os
@@ -147,6 +148,7 @@ class LiveQuoteProvider:
     def __init__(self, requested_provider: str = "auto"):
         self.provider = self._detect_provider(requested_provider)
         self.angel_jwt: Optional[str] = os.environ.get("ANGELONE_JWT_TOKEN")
+        self._angel_conn: Optional[http.client.HTTPSConnection] = None
         self.prev_volumes: Dict[str, int] = {}
         self.prev_prices: Dict[str, float] = {}
 
@@ -332,7 +334,7 @@ class LiveQuoteProvider:
         if not jwt:
             raise RuntimeError("AngelOne JWT unavailable")
         api_key = os.environ["ANGELONE_API_KEY"]
-        url = "https://apiconnect.angelone.in/rest/secure/angelbroking/market/v1/quote/"
+        path = "/rest/secure/angelbroking/market/v1/quote/"
         body = json.dumps(
             {
                 "mode": "FULL",
@@ -343,6 +345,7 @@ class LiveQuoteProvider:
             "Authorization": f"Bearer {jwt}",
             "Content-Type": "application/json",
             "Accept": "application/json",
+            "Connection": "keep-alive",
             "X-UserType": "USER",
             "X-SourceID": "WEB",
             "X-ClientLocalIP": "127.0.0.1",
@@ -350,11 +353,30 @@ class LiveQuoteProvider:
             "X-MacAddress": "00:00:00:00:00:00",
             "X-PrivateKey": api_key,
         }
-        req = urllib.request.Request(url, data=body, headers=headers, method="POST")
+        raw_resp = b""
+        for attempt in range(2):
+            try:
+                if self._angel_conn is None:
+                    self._angel_conn = http.client.HTTPSConnection("apiconnect.angelone.in", timeout=3.0)
+                self._angel_conn.request("POST", path, body=body, headers=headers)
+                resp = self._angel_conn.getresponse()
+                raw_resp = resp.read()
+                if resp.status == 200 and raw_resp:
+                    break
+                self._angel_conn.close()
+                self._angel_conn = None
+            except Exception:
+                if self._angel_conn is not None:
+                    try:
+                        self._angel_conn.close()
+                    except Exception:
+                        pass
+                    self._angel_conn = None
+                if attempt == 1:
+                    raise
         ts_ns = time.time_ns()
         lines = []
-        with urllib.request.urlopen(req, timeout=4.0) as resp:
-            fetched = json.loads(resp.read().decode("utf-8")).get("data", {}).get("fetched", [])
+        fetched = json.loads(raw_resp.decode("utf-8")).get("data", {}).get("fetched", [])
         by_token = {str(item.get("symbolToken")): item for item in fetched}
         for inst in INSTRUMENTS:
             q = by_token.get(inst["angel_token"])
