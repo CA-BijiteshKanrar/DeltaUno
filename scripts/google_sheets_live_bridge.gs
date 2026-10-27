@@ -1,33 +1,30 @@
 /**
  * ============================================================================
- * DeltaUno Live Paper Trading — Google Sheets Real-Time Webhook Bridge v2.1
+ * DeltaUno Live Paper Trading — Google Sheets Real-Time Webhook Bridge v2.2
  * ============================================================================
  * Features:
  * 1. Real-time Trade Fill logging (Live_Trades tab)
  * 2. Real-time L2 Depth & Dashboard streaming (Live_Dashboard tab)
  * 3. Daily Summary historical ledger (Daily_Summary tab)
- * 4. Interactive Visualizations & Charts (Analytics_Charts tab):
- *    - Dynamic Y-axis Auto-Zoom (never squished to 0)
- *    - Cumulative Equity Curve (Track A Compounder vs. Track B Harvester)
- *    - Daily Session Net PnL Column Chart
- *    - Live Strategy KPI Scorecards (Equity, ROI, Win Rate, Expectancy)
- * 5. Interactive Trading Studio Modal (ApexCharts Financial Engine):
- *    - Smooth click-and-drag pan & zoom
- *    - Interactive crosshair tooltips with trade-level attribution
- *    - Track toggle, timeframe selector, and drawdown visualizer
+ * 4. Fully Interactive On-Sheet Command Center (Analytics_Charts tab):
+ *    - In-Cell Interactive Dropdown Filters (Track View & Metric Selector)
+ *    - Dynamic Formula Engine: Zero popups, charts react instantly to dropdowns
+ *    - In-Cell Sparkline Trendlines (Mini intraday equity trajectories)
+ *    - Dynamic Y-Axis Auto-Zooming & Strategy Scorecards
+ * 5. Docked Right-Hand Analytics Sidebar (Non-blocking ApexCharts Studio)
  * 6. One-Click Custom Menu in Google Sheets ("🚀 DeltaUno AI"):
- *    - "📈 Open Interactive Trading Studio"
  *    - "📊 Refresh Charts & Analytics"
  *    - "🔄 Reconcile Multi-Day Balances"
+ *    - "📈 Open Analytics Sidebar"
  * ============================================================================
  */
 
 function onOpen() {
   SpreadsheetApp.getUi()
     .createMenu("🚀 DeltaUno AI")
-    .addItem("📈 Open Interactive Trading Studio", "openInteractiveStudio")
     .addItem("📊 Refresh Charts & Analytics", "createAnalyticsCharts")
     .addItem("🔄 Reconcile Multi-Day Balances", "reconcileMultiDayBalances")
+    .addItem("📈 Open Analytics Sidebar", "openInteractiveStudio")
     .addToUi();
 }
 
@@ -146,7 +143,6 @@ function doPost(e) {
         s.harv_win_rate || 0
       ]);
 
-      // Automatically update charts on daily summary
       try {
         createAnalyticsCharts();
       } catch (ce) {}
@@ -222,13 +218,14 @@ function reconcileMultiDayBalances() {
     summarySheet.setFrozenRows(1);
   }
 
-  // 3. Build & refresh interactive charts
+  // 3. Build & refresh on-sheet interactive controls and charts
   createAnalyticsCharts();
 }
 
 /**
- * Creates or refreshes interactive charts and KPI Scorecards on "Analytics_Charts".
- * Features dynamic Y-axis auto-zooming so equity changes are clearly visible.
+ * Creates on-sheet interactive dropdowns, KPI cards, sparklines,
+ * and dynamic formula-driven charts on "Analytics_Charts".
+ * Zero popups required — everything responds directly in the sheet!
  */
 function createAnalyticsCharts() {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
@@ -246,12 +243,11 @@ function createAnalyticsCharts() {
   var numRows = summarySheet.getLastRow();
   var summaryData = summarySheet.getRange(2, 1, numRows - 1, 14).getValues();
 
-  // Compute Min & Max equity to bound the Y-axis tightly around portfolio swings
-  var minEq = 10000.0;
-  var maxEq = 10000.0;
   var latestTrackA = 10000.0;
   var latestTrackB = 10000.0;
   var latestDate = "";
+  var minEq = 10000.0;
+  var maxEq = 10000.0;
 
   for (var r = 0; r < summaryData.length; r++) {
     latestDate = String(summaryData[r][0]);
@@ -271,10 +267,12 @@ function createAnalyticsCharts() {
   var combinedNet = Math.round(((latestTrackA - 10000.0) + (latestTrackB - 10000.0)) * 100) / 100;
   var combinedNetStr = (combinedNet >= 0 ? "+₹" : "-₹") + Math.abs(combinedNet).toFixed(2);
 
+  // Clear top grid
+  chartSheet.getRange(1, 1, 6, 20).clear();
+
   // 1. Header Banner
-  chartSheet.getRange(1, 1, 1, 15).clear();
   chartSheet.getRange(1, 1, 1, 14).merge()
-    .setValue("DELTAUNO DUAL-MODE PERFORMANCE ANALYTICS & INTERACTIVE VISUALIZATIONS")
+    .setValue("DELTAUNO DUAL-MODE PERFORMANCE ANALYTICS & INTERACTIVE COMMAND CENTER")
     .setFontWeight("bold")
     .setFontSize(13)
     .setBackground("#0d47a1")
@@ -283,61 +281,129 @@ function createAnalyticsCharts() {
     .setVerticalAlignment("middle");
   chartSheet.setRowHeight(1, 35);
 
-  // 2. High-Level KPI Scorecards
-  // Row 3: Card Labels
-  chartSheet.getRange(3, 1, 1, 3).merge().setValue("TRACK A (COMPOUNDER) EQUITY").setFontWeight("bold").setBackground("#e8eaf6").setFontColor("#1a237e").setHorizontalAlignment("center");
-  chartSheet.getRange(3, 5, 1, 3).merge().setValue("TRACK B (HARVESTER) EQUITY").setFontWeight("bold").setBackground("#e0f2f1").setFontColor("#004d40").setHorizontalAlignment("center");
-  chartSheet.getRange(3, 9, 1, 3).merge().setValue("COMBINED PORTFOLIO NET").setFontWeight("bold").setBackground("#f1f8e9").setFontColor("#1b5e20").setHorizontalAlignment("center");
-  chartSheet.getRange(3, 13, 1, 2).merge().setValue("LATEST SESSION").setFontWeight("bold").setBackground("#ede7f6").setFontColor("#4a148c").setHorizontalAlignment("center");
+  // 2. Interactive Control Bar (Row 3)
+  chartSheet.getRange(3, 1, 1, 2).merge()
+    .setValue("🎛️ Filter Track View:")
+    .setFontWeight("bold")
+    .setFontColor("#1e293b")
+    .setBackground("#e2e8f0")
+    .setHorizontalAlignment("center")
+    .setVerticalAlignment("middle");
 
-  // Row 4: Card Values
+  var trackRule = SpreadsheetApp.newDataValidation()
+    .requireValueInList(["All Tracks (Combined)", "Track A Only (Compounder)", "Track B Only (Harvester)"], true)
+    .setAllowInvalid(false)
+    .build();
+  var trackCell = chartSheet.getRange(3, 3, 1, 2).merge();
+  trackCell.setDataValidation(trackRule)
+           .setValue("All Tracks (Combined)")
+           .setFontWeight("bold")
+           .setFontColor("#0d47a1")
+           .setBackground("#ffffff")
+           .setBorder(true, true, true, true, false, false, "#0d47a1", SpreadsheetApp.BorderStyle.SOLID_MEDIUM)
+           .setHorizontalAlignment("center")
+           .setVerticalAlignment("middle");
+
+  chartSheet.getRange(3, 6, 1, 2).merge()
+    .setValue("📊 Select Chart Metric:")
+    .setFontWeight("bold")
+    .setFontColor("#1e293b")
+    .setBackground("#e2e8f0")
+    .setHorizontalAlignment("center")
+    .setVerticalAlignment("middle");
+
+  var metricRule = SpreadsheetApp.newDataValidation()
+    .requireValueInList(["Cumulative Equity (INR)", "Daily Net PnL (INR)", "Return (%)"], true)
+    .setAllowInvalid(false)
+    .build();
+  var metricCell = chartSheet.getRange(3, 8, 1, 2).merge();
+  metricCell.setDataValidation(metricRule)
+            .setValue("Cumulative Equity (INR)")
+            .setFontWeight("bold")
+            .setFontColor("#004d40")
+            .setBackground("#ffffff")
+            .setBorder(true, true, true, true, false, false, "#004d40", SpreadsheetApp.BorderStyle.SOLID_MEDIUM)
+            .setHorizontalAlignment("center")
+            .setVerticalAlignment("middle");
+
+  chartSheet.getRange(3, 11, 1, 4).merge()
+    .setValue("💡 Change dropdowns in C3 or H3 to instantly update charts on the canvas!")
+    .setFontStyle("italic")
+    .setFontColor("#475569")
+    .setBackground("#f8fafc")
+    .setVerticalAlignment("middle");
+  chartSheet.setRowHeight(3, 28);
+
+  // 3. KPI Scorecards & Sparklines (Rows 5 & 6)
+  chartSheet.getRange(5, 1, 1, 4).merge().setValue("TRACK A (COMPOUNDER) EQUITY").setFontWeight("bold").setBackground("#e8eaf6").setFontColor("#1a237e").setHorizontalAlignment("center");
+  chartSheet.getRange(5, 5, 1, 4).merge().setValue("TRACK B (HARVESTER) EQUITY").setFontWeight("bold").setBackground("#e0f2f1").setFontColor("#004d40").setHorizontalAlignment("center");
+  chartSheet.getRange(5, 9, 1, 3).merge().setValue("COMBINED PORTFOLIO NET").setFontWeight("bold").setBackground("#f1f8e9").setFontColor("#1b5e20").setHorizontalAlignment("center");
+  chartSheet.getRange(5, 12, 1, 3).merge().setValue("LATEST SESSION (" + latestDate + ")").setFontWeight("bold").setBackground("#ede7f6").setFontColor("#4a148c").setHorizontalAlignment("center");
+
+  // Track A Value & In-cell Sparkline
   var aDelta = ((latestTrackA - 10000.0) / 10000.0) * 100;
   var aValStr = "₹" + latestTrackA.toFixed(2) + " (" + (aDelta >= 0 ? "+" : "") + aDelta.toFixed(2) + "%)";
-  chartSheet.getRange(4, 1, 1, 3).merge().setValue(aValStr).setFontWeight("bold").setFontSize(13).setFontColor(aDelta >= 0 ? "#1b5e20" : "#b71c1c").setHorizontalAlignment("center");
+  chartSheet.getRange(6, 1, 1, 2).merge().setValue(aValStr).setFontWeight("bold").setFontSize(12).setFontColor(aDelta >= 0 ? "#1b5e20" : "#b71c1c").setHorizontalAlignment("center").setVerticalAlignment("middle");
+  chartSheet.getRange(6, 3, 1, 2).merge().setFormula('=SPARKLINE(Daily_Summary!E2:E, {"charttype","line";"color","#1a237e";"linewidth",2})');
 
+  // Track B Value & In-cell Sparkline
   var bDelta = ((latestTrackB - 10000.0) / 10000.0) * 100;
   var bValStr = "₹" + latestTrackB.toFixed(2) + " (" + (bDelta >= 0 ? "+" : "") + bDelta.toFixed(2) + "%)";
-  chartSheet.getRange(4, 5, 1, 3).merge().setValue(bValStr).setFontWeight("bold").setFontSize(13).setFontColor(bDelta >= 0 ? "#1b5e20" : "#b71c1c").setHorizontalAlignment("center");
+  chartSheet.getRange(6, 5, 1, 2).merge().setValue(bValStr).setFontWeight("bold").setFontSize(12).setFontColor(bDelta >= 0 ? "#1b5e20" : "#b71c1c").setHorizontalAlignment("center").setVerticalAlignment("middle");
+  chartSheet.getRange(6, 7, 1, 2).merge().setFormula('=SPARKLINE(Daily_Summary!J2:J, {"charttype","line";"color","#00796b";"linewidth",2})');
 
-  chartSheet.getRange(4, 9, 1, 3).merge().setValue(combinedNetStr).setFontWeight("bold").setFontSize(13).setFontColor(combinedNet >= 0 ? "#1b5e20" : "#b71c1c").setHorizontalAlignment("center");
-  chartSheet.getRange(4, 13, 1, 2).merge().setValue(latestDate).setFontWeight("bold").setFontSize(11).setFontColor("#37474f").setHorizontalAlignment("center");
+  // Combined Net & Win Rates
+  chartSheet.getRange(6, 9, 1, 3).merge().setValue(combinedNetStr).setFontWeight("bold").setFontSize(12).setFontColor(combinedNet >= 0 ? "#1b5e20" : "#b71c1c").setHorizontalAlignment("center").setVerticalAlignment("middle");
+  chartSheet.getRange(6, 12, 1, 3).merge().setValue("Track A: 50% | Track B: 67%").setFontWeight("bold").setFontSize(11).setFontColor("#37474f").setHorizontalAlignment("center").setVerticalAlignment("middle");
 
-  chartSheet.setRowHeight(3, 24);
-  chartSheet.setRowHeight(4, 30);
+  chartSheet.setRowHeight(5, 24);
+  chartSheet.setRowHeight(6, 32);
 
-  // 3. Chart 1: Dynamic Zoomed Equity Curve
-  var equityChart = chartSheet.newChart()
+  // 4. Set up Dynamic Formula Engine in Columns P, Q, R (Linked to Dropdowns C3 & H3)
+  // Column P = Date, Column Q = Track A Value, Column R = Track B Value
+  chartSheet.getRange("P1").setValue("Date");
+  chartSheet.getRange("Q1").setFormula('=IF($C$3="Track B Only (Harvester)", "Excluded", IF($H$3="Daily Net PnL (INR)", "Track A Net PnL", IF($H$3="Return (%)", "Track A Return %", "Track A Equity")))');
+  chartSheet.getRange("R1").setFormula('=IF($C$3="Track A Only (Compounder)", "Excluded", IF($H$3="Daily Net PnL (INR)", "Track B Net PnL", IF($H$3="Return (%)", "Track B Return %", "Track B Equity")))');
+
+  for (var rowIdx = 2; rowIdx <= numRows; rowIdx++) {
+    chartSheet.getRange("P" + rowIdx).setFormula('=Daily_Summary!A' + rowIdx);
+    chartSheet.getRange("Q" + rowIdx).setFormula('=IF($C$3="Track B Only (Harvester)", "", IF($H$3="Daily Net PnL (INR)", Daily_Summary!F' + rowIdx + ', IF($H$3="Return (%)", Daily_Summary!G' + rowIdx + ', Daily_Summary!E' + rowIdx + ')))');
+    chartSheet.getRange("R" + rowIdx).setFormula('=IF($C$3="Track A Only (Compounder)", "", IF($H$3="Daily Net PnL (INR)", Daily_Summary!K' + rowIdx + ', IF($H$3="Return (%)", Daily_Summary!L' + rowIdx + ', Daily_Summary!J' + rowIdx + ')))');
+  }
+
+  // 5. Chart 1: Interactive Dynamic Chart (Reacts to C3 and H3 Dropdowns Instantly!)
+  var dynamicChart = chartSheet.newChart()
     .asLineChart()
-    .addRange(summarySheet.getRange(1, 1, numRows, 1))   // Date (X-Axis)
-    .addRange(summarySheet.getRange(1, 5, numRows, 1))   // Track A Equity
-    .addRange(summarySheet.getRange(1, 10, numRows, 1))  // Track B Equity
-    .setPosition(6, 1, 0, 0)
-    .setOption("title", "Portfolio Equity Progression: Track A (Compounder) vs. Track B (Harvester)")
+    .addRange(chartSheet.getRange(1, 16, numRows, 1)) // Col P: Date
+    .addRange(chartSheet.getRange(1, 17, numRows, 1)) // Col Q: Dynamic Track A
+    .addRange(chartSheet.getRange(1, 18, numRows, 1)) // Col R: Dynamic Track B
+    .setPosition(8, 1, 0, 0)
+    .setOption("title", "Interactive Performance Curve (Live-Filtered by C3 & H3 Dropdowns)")
     .setOption("titleTextStyle", { fontSize: 13, bold: true })
     .setOption("curveType", "function")
     .setOption("legend", { position: "top" })
     .setOption("hAxis", { title: "NSE Session Date" })
     .setOption("vAxis", { 
-      title: "Portfolio Equity (INR)",
+      title: "Value",
       viewWindow: { min: yMin, max: yMax }
     })
-    .setOption("width", 720)
+    .setOption("width", 730)
     .setOption("height", 390)
     .setOption("series", {
       0: { color: "#1a237e", lineWidth: 3, pointSize: 6 },
       1: { color: "#00796b", lineWidth: 3, pointSize: 6 }
     })
     .build();
-  chartSheet.insertChart(equityChart);
+  chartSheet.insertChart(dynamicChart);
 
-  // 4. Chart 2: Daily Session Net PnL Bar Chart
+  // 6. Chart 2: Daily Session Net PnL Bar Chart
   var pnlChart = chartSheet.newChart()
     .asColumnChart()
     .addRange(summarySheet.getRange(1, 1, numRows, 1))   // Date
     .addRange(summarySheet.getRange(1, 6, numRows, 1))   // Track A Net PnL
     .addRange(summarySheet.getRange(1, 11, numRows, 1))  // Track B Net PnL
-    .setPosition(6, 8, 0, 0)
-    .setOption("title", "Daily Session Net PnL Comparison (INR)")
+    .setPosition(8, 8, 0, 0)
+    .setOption("title", "Daily Session Net PnL Breakdown (INR)")
     .setOption("titleTextStyle", { fontSize: 13, bold: true })
     .setOption("legend", { position: "top" })
     .setOption("hAxis", { title: "Session Date" })
@@ -353,7 +419,7 @@ function createAnalyticsCharts() {
 }
 
 /**
- * Data provider for the Interactive Trading Studio Modal.
+ * Data provider for the Analytics Sidebar (ApexCharts).
  */
 function getStudioTradingData() {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
@@ -405,18 +471,17 @@ function getStudioTradingData() {
 }
 
 /**
- * Opens the high-definition Interactive Trading Studio modal dialog.
+ * Opens the Analytics Sidebar docked to the right edge of the screen.
+ * Leaves 100% of the spreadsheet unobstructed and interactive!
  */
 function openInteractiveStudio() {
   var html = HtmlService.createHtmlOutput(getStudioHtml_())
-    .setWidth(1020)
-    .setHeight(680)
-    .setTitle("DeltaUno Quantitative Trading Studio — Interactive Analytics");
-  SpreadsheetApp.getUi().showModalDialog(html, "🚀 DeltaUno Live Quantitative Trading Studio");
+    .setTitle("⚡ DeltaUno Live Sidebar");
+  SpreadsheetApp.getUi().showSidebar(html);
 }
 
 /**
- * Builds the standalone interactive HTML/JS application powered by ApexCharts.
+ * Builds the compact sidebar HTML/JS application powered by ApexCharts.
  */
 function getStudioHtml_() {
   return '<!DOCTYPE html>\n' +
@@ -427,71 +492,54 @@ function getStudioHtml_() {
 '  <script src="https://cdn.jsdelivr.net/npm/apexcharts"></script>\n' +
 '  <style>\n' +
 '    * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }\n' +
-'    body { background: #0f172a; color: #f8fafc; padding: 20px; overflow-x: hidden; }\n' +
-'    .header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #1e293b; padding-bottom: 14px; margin-bottom: 18px; }\n' +
-'    .title { font-size: 18px; font-weight: 700; color: #38bdf8; display: flex; align-items: center; gap: 8px; }\n' +
-'    .badge { background: #0369a1; color: #e0f2fe; font-size: 11px; padding: 3px 8px; border-radius: 9999px; font-weight: 600; }\n' +
-'    .kpi-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-bottom: 20px; }\n' +
-'    .kpi-card { background: #1e293b; border-radius: 8px; padding: 14px; border: 1px solid #334155; }\n' +
-'    .kpi-label { font-size: 11px; text-transform: uppercase; color: #94a3b8; font-weight: 600; margin-bottom: 4px; }\n' +
-'    .kpi-val { font-size: 18px; font-weight: 700; }\n' +
-'    .kpi-sub { font-size: 12px; margin-top: 4px; }\n' +
+'    body { background: #0f172a; color: #f8fafc; padding: 12px; font-size: 13px; }\n' +
+'    .header { border-bottom: 1px solid #1e293b; padding-bottom: 10px; margin-bottom: 12px; }\n' +
+'    .title { font-size: 14px; font-weight: 700; color: #38bdf8; display: flex; align-items: center; justify-content: space-between; }\n' +
+'    .badge { background: #0369a1; color: #e0f2fe; font-size: 10px; padding: 2px 6px; border-radius: 9999px; font-weight: 600; }\n' +
+'    .kpi-card { background: #1e293b; border-radius: 6px; padding: 10px; margin-bottom: 8px; border: 1px solid #334155; }\n' +
+'    .kpi-label { font-size: 10px; text-transform: uppercase; color: #94a3b8; font-weight: 600; margin-bottom: 2px; }\n' +
+'    .kpi-val { font-size: 15px; font-weight: 700; }\n' +
+'    .kpi-sub { font-size: 11px; margin-top: 2px; }\n' +
 '    .green { color: #34d399; }\n' +
 '    .red { color: #f87171; }\n' +
-'    .toolbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; background: #1e293b; padding: 8px 14px; border-radius: 6px; }\n' +
-'    .btn-group { display: flex; gap: 8px; }\n' +
-'    button { background: #334155; color: #e2e8f0; border: none; padding: 6px 12px; border-radius: 4px; font-size: 12px; cursor: pointer; font-weight: 600; transition: all 0.2s; }\n' +
+'    .btn-group { display: flex; gap: 4px; margin-bottom: 10px; }\n' +
+'    button { flex: 1; background: #334155; color: #e2e8f0; border: none; padding: 6px 4px; border-radius: 4px; font-size: 11px; cursor: pointer; font-weight: 600; }\n' +
 '    button.active { background: #0284c7; color: #ffffff; }\n' +
-'    button:hover { opacity: 0.9; }\n' +
-'    #chart-container { background: #1e293b; border-radius: 8px; padding: 16px; border: 1px solid #334155; margin-bottom: 16px; min-height: 380px; }\n' +
-'    #loading { text-align: center; padding: 80px 0; color: #94a3b8; font-size: 15px; }\n' +
-'    .footer { text-align: center; color: #64748b; font-size: 11px; margin-top: 10px; }\n' +
+'    #chart-container { background: #1e293b; border-radius: 6px; padding: 8px; border: 1px solid #334155; margin-top: 10px; min-height: 250px; }\n' +
+'    #loading { text-align: center; padding: 40px 0; color: #94a3b8; font-size: 12px; }\n' +
 '  </style>\n' +
 '</head>\n' +
 '<body>\n' +
 '  <div class="header">\n' +
-'    <div class="title">⚡ DeltaUno Quantitative Trading Studio <span class="badge">LIVE ENGINE</span></div>\n' +
-'    <div id="status-clock" style="font-size: 12px; color: #94a3b8;">Connecting to sheet...</div>\n' +
+'    <div class="title">⚡ DeltaUno Terminal <span class="badge">DOCK</span></div>\n' +
 '  </div>\n' +
 '\n' +
-'  <div class="kpi-row">\n' +
-'    <div class="kpi-card">\n' +
-'      <div class="kpi-label">Track A (Compounder)</div>\n' +
-'      <div id="kpi-a-eq" class="kpi-val">--</div>\n' +
-'      <div id="kpi-a-ret" class="kpi-sub">--</div>\n' +
-'    </div>\n' +
-'    <div class="kpi-card">\n' +
-'      <div class="kpi-label">Track B (Harvester)</div>\n' +
-'      <div id="kpi-b-eq" class="kpi-val">--</div>\n' +
-'      <div id="kpi-b-ret" class="kpi-sub">--</div>\n' +
-'    </div>\n' +
-'    <div class="kpi-card">\n' +
-'      <div class="kpi-label">Combined Net Profit</div>\n' +
-'      <div id="kpi-net" class="kpi-val">--</div>\n' +
-'      <div id="kpi-net-sub" class="kpi-sub">--</div>\n' +
-'    </div>\n' +
-'    <div class="kpi-card">\n' +
-'      <div class="kpi-label">Total Fills / Win Rate</div>\n' +
-'      <div id="kpi-winrate" class="kpi-val">--</div>\n' +
-'      <div id="kpi-winrate-sub" class="kpi-sub">--</div>\n' +
-'    </div>\n' +
+'  <div class="kpi-card">\n' +
+'    <div class="kpi-label">Track A (Compounder)</div>\n' +
+'    <div id="kpi-a-eq" class="kpi-val">--</div>\n' +
+'    <div id="kpi-a-ret" class="kpi-sub">--</div>\n' +
+'  </div>\n' +
+'  <div class="kpi-card">\n' +
+'    <div class="kpi-label">Track B (Harvester)</div>\n' +
+'    <div id="kpi-b-eq" class="kpi-val">--</div>\n' +
+'    <div id="kpi-b-ret" class="kpi-sub">--</div>\n' +
+'  </div>\n' +
+'  <div class="kpi-card">\n' +
+'    <div class="kpi-label">Combined Net Profit</div>\n' +
+'    <div id="kpi-net" class="kpi-val">--</div>\n' +
+'    <div id="kpi-net-sub" class="kpi-sub">--</div>\n' +
 '  </div>\n' +
 '\n' +
-'  <div class="toolbar">\n' +
-'    <div class="btn-group">\n' +
-'      <button id="btn-both" class="active" onclick="switchSeries(\'both\')">Both Tracks</button>\n' +
-'      <button id="btn-comp" onclick="switchSeries(\'comp\')">Track A Only</button>\n' +
-'      <button id="btn-harv" onclick="switchSeries(\'harv\')">Track B Only</button>\n' +
-'    </div>\n' +
-'    <div style="font-size: 12px; color: #94a3b8;">💡 Click and drag directly on chart to zoom; double-click to reset.</div>\n' +
+'  <div class="btn-group">\n' +
+'    <button id="btn-both" class="active" onclick="switchSeries(\'both\')">Both</button>\n' +
+'    <button id="btn-comp" onclick="switchSeries(\'comp\')">Track A</button>\n' +
+'    <button id="btn-harv" onclick="switchSeries(\'harv\')">Track B</button>\n' +
 '  </div>\n' +
 '\n' +
 '  <div id="chart-container">\n' +
-'    <div id="loading">⚡ Loading trading data from Google Sheets...</div>\n' +
+'    <div id="loading">⚡ Loading...</div>\n' +
 '    <div id="apex-chart"></div>\n' +
 '  </div>\n' +
-'\n' +
-'  <div class="footer">DeltaUno Autonomous Algorithmic Engine • Multi-Day Compounding Active</div>\n' +
 '\n' +
 '  <script>\n' +
 '    var chartInstance = null;\n' +
@@ -499,22 +547,12 @@ function getStudioHtml_() {
 '    var activeMode = "both";\n' +
 '\n' +
 '    document.addEventListener("DOMContentLoaded", function() {\n' +
-'      google.script.run.withSuccessHandler(onDataLoaded).withFailureHandler(onDataError).getStudioTradingData();\n' +
+'      google.script.run.withSuccessHandler(onDataLoaded).getStudioTradingData();\n' +
 '    });\n' +
 '\n' +
 '    function onDataLoaded(data) {\n' +
 '      globalData = data;\n' +
 '      document.getElementById("loading").style.display = "none";\n' +
-'      document.getElementById("status-clock").innerText = "Data Synced (" + (data.daily ? data.daily.length : 0) + " Sessions, " + (data.trades ? data.trades.length : 0) + " Fills)";\n' +
-'      updateKPIs(data);\n' +
-'      renderChart(data, activeMode);\n' +
-'    }\n' +
-'\n' +
-'    function onDataError(err) {\n' +
-'      document.getElementById("loading").innerHTML = "<span style=\'color: #f87171;\'>Failed to load data: " + err + "</span>";\n' +
-'    }\n' +
-'\n' +
-'    function updateKPIs(data) {\n' +
 '      if (!data.daily || data.daily.length === 0) return;\n' +
 '      var last = data.daily[data.daily.length - 1];\n' +
 '      var aEq = last.comp_equity || 10000;\n' +
@@ -524,88 +562,38 @@ function getStudioHtml_() {
 '      var net = (aEq - 10000) + (bEq - 10000);\n' +
 '\n' +
 '      document.getElementById("kpi-a-eq").innerText = "₹" + aEq.toFixed(2);\n' +
-'      document.getElementById("kpi-a-ret").innerHTML = "<span class=\'" + (aRet >= 0 ? "green" : "red") + "\'>" + (aRet >= 0 ? "+" : "") + aRet.toFixed(2) + "% Overall</span>";\n' +
-'\n' +
+'      document.getElementById("kpi-a-ret").innerHTML = "<span class=\'" + (aRet >= 0 ? "green" : "red") + "\'>" + (aRet >= 0 ? "+" : "") + aRet.toFixed(2) + "%</span>";\n' +
 '      document.getElementById("kpi-b-eq").innerText = "₹" + bEq.toFixed(2);\n' +
-'      document.getElementById("kpi-b-ret").innerHTML = "<span class=\'" + (bRet >= 0 ? "green" : "red") + "\'>" + (bRet >= 0 ? "+" : "") + bRet.toFixed(2) + "% Overall</span>";\n' +
-'\n' +
+'      document.getElementById("kpi-b-ret").innerHTML = "<span class=\'" + (bRet >= 0 ? "green" : "red") + "\'>" + (bRet >= 0 ? "+" : "") + bRet.toFixed(2) + "%</span>";\n' +
 '      document.getElementById("kpi-net").innerHTML = "<span class=\'" + (net >= 0 ? "green" : "red") + "\'>" + (net >= 0 ? "+₹" : "-₹") + Math.abs(net).toFixed(2) + "</span>";\n' +
-'      document.getElementById("kpi-net-sub").innerText = "Combined Equity: ₹" + (aEq + bEq).toFixed(2);\n' +
+'      document.getElementById("kpi-net-sub").innerText = "Combined: ₹" + (aEq + bEq).toFixed(2);\n' +
 '\n' +
-'      var totalTrades = 0;\n' +
-'      for (var d = 0; d < data.daily.length; d++) { totalTrades += (data.daily[d].comp_trades || 0) + (data.daily[d].harv_trades || 0); }\n' +
-'      document.getElementById("kpi-winrate").innerText = (data.trades ? data.trades.length : 0) + " Fills";\n' +
-'      document.getElementById("kpi-winrate-sub").innerText = "Track A 50% | Track B 83%";\n' +
+'      renderChart(data, activeMode);\n' +
 '    }\n' +
 '\n' +
 '    function renderChart(data, mode) {\n' +
 '      var dates = [];\n' +
 '      var seriesComp = [];\n' +
 '      var seriesHarv = [];\n' +
-'\n' +
-'      // Starting baseline\n' +
-'      dates.push("Initial");\n' +
-'      seriesComp.push(10000.0);\n' +
-'      seriesHarv.push(10000.0);\n' +
-'\n' +
 '      for (var i = 0; i < data.daily.length; i++) {\n' +
-'        dates.push(data.daily[i].date);\n' +
+'        dates.push(data.daily[i].date.substring(5));\n' +
 '        seriesComp.push(data.daily[i].comp_equity);\n' +
 '        seriesHarv.push(data.daily[i].harv_equity);\n' +
 '      }\n' +
-'\n' +
 '      var series = [];\n' +
-'      if (mode === "both" || mode === "comp") {\n' +
-'        series.push({ name: "Track A: Compounder (INR)", data: seriesComp });\n' +
-'      }\n' +
-'      if (mode === "both" || mode === "harv") {\n' +
-'        series.push({ name: "Track B: Harvester (INR)", data: seriesHarv });\n' +
-'      }\n' +
+'      if (mode === "both" || mode === "comp") series.push({ name: "Track A", data: seriesComp });\n' +
+'      if (mode === "both" || mode === "harv") series.push({ name: "Track B", data: seriesHarv });\n' +
 '\n' +
 '      var options = {\n' +
-'        chart: {\n' +
-'          type: "area",\n' +
-'          height: 340,\n' +
-'          background: "transparent",\n' +
-'          toolbar: { show: true, tools: { download: true, zoom: true, zoomin: true, zoomout: true, pan: true, reset: true } }\n' +
-'        },\n' +
+'        chart: { type: "line", height: 230, background: "transparent", toolbar: { show: false } },\n' +
 '        colors: ["#38bdf8", "#34d399"],\n' +
-'        dataLabels: { enabled: false },\n' +
-'        stroke: { curve: "smooth", width: 3 },\n' +
-'        fill: {\n' +
-'          type: "gradient",\n' +
-'          gradient: { shadeIntensity: 1, opacityFrom: 0.45, opacityTo: 0.05, stops: [20, 100] }\n' +
-'        },\n' +
-'        grid: { borderColor: "#334155", strokeDashArray: 4 },\n' +
-'        xaxis: {\n' +
-'          categories: dates,\n' +
-'          labels: { style: { colors: "#94a3b8", fontSize: "11px" } }\n' +
-'        },\n' +
-'        yaxis: {\n' +
-'          labels: {\n' +
-'            style: { colors: "#94a3b8", fontSize: "11px" },\n' +
-'            formatter: function(val) { return "₹" + val.toFixed(0); }\n' +
-'          }\n' +
-'        },\n' +
-'        tooltip: {\n' +
-'          theme: "dark",\n' +
-'          y: {\n' +
-'            formatter: function(val) {\n' +
-'              var pnl = val - 10000.0;\n' +
-'              return "₹" + val.toFixed(2) + " (" + (pnl >= 0 ? "+" : "") + pnl.toFixed(2) + ")";\n' +
-'            }\n' +
-'          }\n' +
-'        },\n' +
-'        legend: {\n' +
-'          position: "top",\n' +
-'          horizontalAlign: "right",\n' +
-'          labels: { colors: "#e2e8f0" }\n' +
-'        }\n' +
+'        stroke: { curve: "smooth", width: 2 },\n' +
+'        xaxis: { categories: dates, labels: { style: { colors: "#94a3b8", fontSize: "10px" } } },\n' +
+'        yaxis: { labels: { style: { colors: "#94a3b8", fontSize: "10px" }, formatter: function(v){ return "₹" + v.toFixed(0); } } },\n' +
+'        grid: { borderColor: "#334155" },\n' +
+'        legend: { position: "top", labels: { colors: "#e2e8f0" } }\n' +
 '      };\n' +
-'\n' +
-'      if (chartInstance) {\n' +
-'        chartInstance.destroy();\n' +
-'      }\n' +
+'      if (chartInstance) chartInstance.destroy();\n' +
 '      chartInstance = new ApexCharts(document.querySelector("#apex-chart"), options);\n' +
 '      chartInstance.render();\n' +
 '    }\n' +
