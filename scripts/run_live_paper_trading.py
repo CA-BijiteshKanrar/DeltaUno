@@ -585,7 +585,42 @@ def run_connection_test(provider_arg: str) -> int:
 class GoogleSheetsLiveSync:
     """Streams real-time Dual-Mode trades, 60s heartbeats, and EOD summary to Google Sheets."""
 
-    def __init__(self, webhook_url: str, provider_name: str, mode: str):
+    @staticmethod
+    def fetch_prior_closing_balances(sheet_id: str) -> Tuple[float, float]:
+        """Fetch prior session closing equity from Google Sheet Live_Trades tab for multi-day compounding."""
+        if not sheet_id:
+            return (10000.0, 10000.0)
+        try:
+            import csv, io
+            url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/gviz/tq?tqx=out:csv&sheet=Live_Trades"
+            req = urllib.request.Request(url, headers={"User-Agent": "DeltaUno-Monitor"})
+            with urllib.request.urlopen(req, timeout=5.0) as r:
+                content = r.read().decode("utf-8", errors="replace")
+            reader = csv.reader(io.StringIO(content))
+            rows = list(reader)
+            last_comp = 10000.0
+            last_harv = 10000.0
+            for r in rows[1:]:
+                if len(r) >= 13:
+                    trk = r[2].strip().upper()
+                    side = r[3].strip().upper()
+                    bal_str = r[12].strip()
+                    if side == "SELL" and bal_str:
+                        try:
+                            val = float(bal_str)
+                            if trk == "COMPOUNDER":
+                                last_comp = val
+                            elif trk == "HARVESTER":
+                                last_harv = val
+                        except ValueError:
+                            pass
+            return (round(last_comp, 2), round(last_harv, 2))
+        except Exception as e:
+            print(f"[INFO] Could not fetch prior closing balance ({e}); defaulting to 10000.0 INR baseline.", flush=True)
+            return (10000.0, 10000.0)
+
+    def __init__(self, webhook_url: str, provider_name: str, mode: str,
+                 initial_comp_equity: float = 10000.0, initial_harv_equity: float = 10000.0):
         self.webhook_url = webhook_url.strip()
         self.provider_name = provider_name.upper()
         self.mode = mode.upper()
@@ -595,8 +630,8 @@ class GoogleSheetsLiveSync:
         self.latest_quotes: List[Dict[str, Any]] = []
 
         self.tracks: Dict[str, Dict[str, Any]] = {
-            "COMPOUNDER": {"equity": 10000.0, "pnl": 0.0, "trades": 0, "wins": 0, "open_pos": "FLAT"},
-            "HARVESTER": {"equity": 10000.0, "pnl": 0.0, "trades": 0, "wins": 0, "open_pos": "FLAT"},
+            "COMPOUNDER": {"equity": float(initial_comp_equity), "pnl": float(initial_comp_equity - 10000.0), "trades": 0, "wins": 0, "open_pos": "FLAT"},
+            "HARVESTER": {"equity": float(initial_harv_equity), "pnl": float(initial_harv_equity - 10000.0), "trades": 0, "wins": 0, "open_pos": "FLAT"},
         }
 
     @property
@@ -692,6 +727,10 @@ class GoogleSheetsLiveSync:
                 trk["open_pos"] = "FLAT"
             dash = self._build_dashboard_dict("LIVE_RUNNING")
 
+        bal_val = ev.get("balance", "")
+        if not bal_val and trk_name in self.tracks:
+            bal_val = round(self.tracks[trk_name]["equity"], 2)
+
         payload = {
             "event": "TRADE_FILL",
             "timestamp_ist": now_str,
@@ -706,7 +745,7 @@ class GoogleSheetsLiveSync:
             "gross_pnl": ev.get("gross_pnl", ""),
             "taxes": ev.get("taxes", ""),
             "net_pnl": ev.get("net_pnl", ""),
-            "balance": ev.get("balance", ""),
+            "balance": bal_val,
             "dashboard": dash,
         }
         threading.Thread(target=self._post_json, args=(payload,), daemon=True).start()
@@ -839,7 +878,9 @@ def main() -> int:
 
     provider = LiveQuoteProvider(args.provider)
     sheets_url = os.environ.get("GOOGLE_SHEETS_WEBHOOK_URL", "")
-    sheets_sync = GoogleSheetsLiveSync(sheets_url, provider.provider, args.mode)
+    sheet_id = os.environ.get("GOOGLE_SHEETS_ID", "133BVp-xnP4lZdbLlqDpagmhp10OLAHXzWaxhsYzHaJ4")
+    comp_init_cap, harv_init_cap = GoogleSheetsLiveSync.fetch_prior_closing_balances(sheet_id)
+    sheets_sync = GoogleSheetsLiveSync(sheets_url, provider.provider, args.mode, comp_init_cap, harv_init_cap)
 
     now_ist = datetime.now(TZ_IST)
     date_tag = now_ist.strftime("%Y%m%d")
@@ -876,7 +917,14 @@ def main() -> int:
             time.sleep(min(5.0, max(0.5, wait_s)))
         print("\n[MARKET OPEN] 09:15:00 IST reached! Launching C++20 Engine...")
 
-    cmd = [str(engine_bin), "--mode", args.mode, "--live-tail", "--csv", str(live_csv)]
+    cmd = [
+        str(engine_bin),
+        "--mode", args.mode,
+        "--live-tail",
+        "--csv", str(live_csv),
+        "--capital", f"{comp_init_cap:.2f}",
+        "--harv-capital", f"{harv_init_cap:.2f}",
+    ]
     proc = subprocess.Popen(
         cmd,
         cwd=REPO_ROOT,

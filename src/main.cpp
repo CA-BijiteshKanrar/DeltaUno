@@ -53,6 +53,8 @@ int main(int argc, char* argv[]) {
     std::string config_dir = "config";
     std::string cli_webhook_json;
     std::string run_mode = "both"; // "both" (default), "compounder", or "harvester"
+    double initial_capital_override = 0.0;
+    double harv_capital_override = 0.0;
     bool realtime_pacing = false;
     bool live_tail = false;
     bool verbose_logs = false;
@@ -67,6 +69,10 @@ int main(int argc, char* argv[]) {
             cli_webhook_json = argv[++i];
         } else if (arg == "--mode" && i + 1 < argc) {
             run_mode = argv[++i];
+        } else if (arg == "--capital" && i + 1 < argc) {
+            initial_capital_override = std::stod(argv[++i]);
+        } else if (arg == "--harv-capital" && i + 1 < argc) {
+            harv_capital_override = std::stod(argv[++i]);
         } else if (arg == "--realtime") {
             realtime_pacing = true;
         } else if (arg == "--live-tail") {
@@ -84,7 +90,10 @@ int main(int argc, char* argv[]) {
         verbose_logs ? core::LogLevel::DEBUG : core::LogLevel::INFO);
 
     // 2. Load Runtime Configurations (Risk Limits, Liquid Whitelist, Macro Event Calendar)
-    const core::RiskConfig risk_cfg = core::ConfigLoader::load_risk_config(config_dir + "/risk_limits.json");
+    core::RiskConfig risk_cfg = core::ConfigLoader::load_risk_config(config_dir + "/risk_limits.json");
+    if (initial_capital_override > 0.0) {
+        risk_cfg.initial_capital_inr = initial_capital_override;
+    }
     LOG_INFO("=================================================");
     LOG_INFO("   DeltaUno Low-Latency C++20 Trading Engine     ");
     {
@@ -189,8 +198,9 @@ int main(int argc, char* argv[]) {
     harv_cfg.enable_ofi_harvest = true;
 
     risk::RiskManager harv_risk_mgr(harv_cfg);
-    execution::PaperBroker harv_broker(risk_cfg.initial_capital_inr);
-    execution::TradeAuditor harv_auditor(risk_cfg.initial_capital_inr);
+    const double harv_initial_cap = (harv_capital_override > 0.0) ? harv_capital_override : risk_cfg.initial_capital_inr;
+    execution::PaperBroker harv_broker(harv_initial_cap);
+    execution::TradeAuditor harv_auditor(harv_initial_cap);
     strategy::MomentumBreakoutStrategy harv_strat(
         2.5, 0.55, whitelist, 5, risk_cfg.circuit_limit_buffer_pct,
         1.80, 1.00, 1.25, strategy::StrategyMode::HARVESTER);
