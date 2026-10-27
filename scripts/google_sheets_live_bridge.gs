@@ -481,7 +481,8 @@ function openInteractiveStudio() {
 }
 
 /**
- * Builds the compact sidebar HTML/JS application powered by ApexCharts.
+ * Builds the compact sidebar HTML/JS application with a 100% dependency-free,
+ * CSP-safe interactive SVG vector charting engine (zero external CDNs).
  */
 function getStudioHtml_() {
   return '<!DOCTYPE html>\n' +
@@ -489,12 +490,11 @@ function getStudioHtml_() {
 '<head>\n' +
 '  <base target="_top">\n' +
 '  <meta charset="utf-8">\n' +
-'  <script src="https://cdn.jsdelivr.net/npm/apexcharts"></script>\n' +
 '  <style>\n' +
-'    * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }\n' +
+'    * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }\n' +
 '    body { background: #0f172a; color: #f8fafc; padding: 12px; font-size: 13px; }\n' +
-'    .header { border-bottom: 1px solid #1e293b; padding-bottom: 10px; margin-bottom: 12px; }\n' +
-'    .title { font-size: 14px; font-weight: 700; color: #38bdf8; display: flex; align-items: center; justify-content: space-between; }\n' +
+'    .header { border-bottom: 1px solid #1e293b; padding-bottom: 8px; margin-bottom: 12px; display: flex; align-items: center; justify-content: space-between; }\n' +
+'    .title { font-size: 14px; font-weight: 700; color: #38bdf8; }\n' +
 '    .badge { background: #0369a1; color: #e0f2fe; font-size: 10px; padding: 2px 6px; border-radius: 9999px; font-weight: 600; }\n' +
 '    .kpi-card { background: #1e293b; border-radius: 6px; padding: 10px; margin-bottom: 8px; border: 1px solid #334155; }\n' +
 '    .kpi-label { font-size: 10px; text-transform: uppercase; color: #94a3b8; font-weight: 600; margin-bottom: 2px; }\n' +
@@ -503,15 +503,22 @@ function getStudioHtml_() {
 '    .green { color: #34d399; }\n' +
 '    .red { color: #f87171; }\n' +
 '    .btn-group { display: flex; gap: 4px; margin-bottom: 10px; }\n' +
-'    button { flex: 1; background: #334155; color: #e2e8f0; border: none; padding: 6px 4px; border-radius: 4px; font-size: 11px; cursor: pointer; font-weight: 600; }\n' +
+'    button { flex: 1; background: #334155; color: #e2e8f0; border: none; padding: 6px 4px; border-radius: 4px; font-size: 11px; cursor: pointer; font-weight: 600; transition: all 0.2s; }\n' +
 '    button.active { background: #0284c7; color: #ffffff; }\n' +
-'    #chart-container { background: #1e293b; border-radius: 6px; padding: 8px; border: 1px solid #334155; margin-top: 10px; min-height: 250px; }\n' +
-'    #loading { text-align: center; padding: 40px 0; color: #94a3b8; font-size: 12px; }\n' +
+'    #chart-box { background: #1e293b; border-radius: 6px; padding: 10px; border: 1px solid #334155; margin-top: 8px; }\n' +
+'    .chart-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; font-size: 11px; font-weight: 600; }\n' +
+'    #hover-val { color: #38bdf8; font-weight: 700; }\n' +
+'    svg { display: block; width: 100%; height: 180px; }\n' +
+'    .legend { display: flex; justify-content: center; gap: 14px; font-size: 10px; margin-top: 6px; color: #94a3b8; }\n' +
+'    .legend span { display: inline-flex; align-items: center; gap: 4px; }\n' +
+'    .dot-a { width: 8px; height: 8px; background: #38bdf8; border-radius: 50%; }\n' +
+'    .dot-b { width: 8px; height: 8px; background: #34d399; border-radius: 50%; }\n' +
 '  </style>\n' +
 '</head>\n' +
 '<body>\n' +
 '  <div class="header">\n' +
-'    <div class="title">⚡ DeltaUno Terminal <span class="badge">DOCK</span></div>\n' +
+'    <div class="title">⚡ DeltaUno Terminal</div>\n' +
+'    <span class="badge">DOCK</span>\n' +
 '  </div>\n' +
 '\n' +
 '  <div class="kpi-card">\n' +
@@ -536,13 +543,19 @@ function getStudioHtml_() {
 '    <button id="btn-harv" onclick="switchSeries(\'harv\')">Track B</button>\n' +
 '  </div>\n' +
 '\n' +
-'  <div id="chart-container">\n' +
-'    <div id="loading">⚡ Loading...</div>\n' +
-'    <div id="apex-chart"></div>\n' +
+'  <div id="chart-box">\n' +
+'    <div class="chart-head">\n' +
+'      <span>EQUITY CURVE</span>\n' +
+'      <span id="hover-val">Hover dots</span>\n' +
+'    </div>\n' +
+'    <svg id="svg-chart" viewBox="0 0 260 170"></svg>\n' +
+'    <div class="legend">\n' +
+'      <span><i class="dot-a"></i> Track A</span>\n' +
+'      <span><i class="dot-b"></i> Track B</span>\n' +
+'    </div>\n' +
 '  </div>\n' +
 '\n' +
 '  <script>\n' +
-'    var chartInstance = null;\n' +
 '    var globalData = null;\n' +
 '    var activeMode = "both";\n' +
 '\n' +
@@ -552,7 +565,6 @@ function getStudioHtml_() {
 '\n' +
 '    function onDataLoaded(data) {\n' +
 '      globalData = data;\n' +
-'      document.getElementById("loading").style.display = "none";\n' +
 '      if (!data.daily || data.daily.length === 0) return;\n' +
 '      var last = data.daily[data.daily.length - 1];\n' +
 '      var aEq = last.comp_equity || 10000;\n' +
@@ -568,34 +580,104 @@ function getStudioHtml_() {
 '      document.getElementById("kpi-net").innerHTML = "<span class=\'" + (net >= 0 ? "green" : "red") + "\'>" + (net >= 0 ? "+₹" : "-₹") + Math.abs(net).toFixed(2) + "</span>";\n' +
 '      document.getElementById("kpi-net-sub").innerText = "Combined: ₹" + (aEq + bEq).toFixed(2);\n' +
 '\n' +
-'      renderChart(data, activeMode);\n' +
+'      renderSvgChart(data, activeMode);\n' +
 '    }\n' +
 '\n' +
-'    function renderChart(data, mode) {\n' +
-'      var dates = [];\n' +
-'      var seriesComp = [];\n' +
-'      var seriesHarv = [];\n' +
-'      for (var i = 0; i < data.daily.length; i++) {\n' +
-'        dates.push(data.daily[i].date.substring(5));\n' +
-'        seriesComp.push(data.daily[i].comp_equity);\n' +
-'        seriesHarv.push(data.daily[i].harv_equity);\n' +
-'      }\n' +
-'      var series = [];\n' +
-'      if (mode === "both" || mode === "comp") series.push({ name: "Track A", data: seriesComp });\n' +
-'      if (mode === "both" || mode === "harv") series.push({ name: "Track B", data: seriesHarv });\n' +
+'    function renderSvgChart(data, mode) {\n' +
+'      var svg = document.getElementById("svg-chart");\n' +
+'      svg.innerHTML = "";\n' +
+'      if (!data || !data.daily || data.daily.length === 0) return;\n' +
 '\n' +
-'      var options = {\n' +
-'        chart: { type: "line", height: 230, background: "transparent", toolbar: { show: false } },\n' +
-'        colors: ["#38bdf8", "#34d399"],\n' +
-'        stroke: { curve: "smooth", width: 2 },\n' +
-'        xaxis: { categories: dates, labels: { style: { colors: "#94a3b8", fontSize: "10px" } } },\n' +
-'        yaxis: { labels: { style: { colors: "#94a3b8", fontSize: "10px" }, formatter: function(v){ return "₹" + v.toFixed(0); } } },\n' +
-'        grid: { borderColor: "#334155" },\n' +
-'        legend: { position: "top", labels: { colors: "#e2e8f0" } }\n' +
-'      };\n' +
-'      if (chartInstance) chartInstance.destroy();\n' +
-'      chartInstance = new ApexCharts(document.querySelector("#apex-chart"), options);\n' +
-'      chartInstance.render();\n' +
+'      var ptsA = [10000.0];\n' +
+'      var ptsB = [10000.0];\n' +
+'      var labels = ["Init"];\n' +
+'\n' +
+'      for (var i = 0; i < data.daily.length; i++) {\n' +
+'        ptsA.push(data.daily[i].comp_equity);\n' +
+'        ptsB.push(data.daily[i].harv_equity);\n' +
+'        labels.push(data.daily[i].date.substring(5));\n' +
+'      }\n' +
+'\n' +
+'      var pool = [];\n' +
+'      if (mode === "both" || mode === "comp") pool = pool.concat(ptsA);\n' +
+'      if (mode === "both" || mode === "harv") pool = pool.concat(ptsB);\n' +
+'\n' +
+'      var minVal = Math.min.apply(null, pool) - 15;\n' +
+'      var maxVal = Math.max.apply(null, pool) + 15;\n' +
+'      if (minVal === maxVal) { minVal -= 50; maxVal += 50; }\n' +
+'\n' +
+'      var w = 260, h = 170, padL = 36, padR = 12, padT = 16, padB = 24;\n' +
+'      var plotW = w - padL - padR;\n' +
+'      var plotH = h - padT - padB;\n' +
+'\n' +
+'      // Gridlines & Y-Axis values\n' +
+'      var steps = 3;\n' +
+'      for (var s = 0; s <= steps; s++) {\n' +
+'        var yVal = minVal + (maxVal - minVal) * (s / steps);\n' +
+'        var yPos = padT + plotH - (s / steps) * plotH;\n' +
+'\n' +
+'        var line = document.createElementNS("http://www.w3.org/2000/svg", "line");\n' +
+'        line.setAttribute("x1", padL); line.setAttribute("y1", yPos);\n' +
+'        line.setAttribute("x2", w - padR); line.setAttribute("y2", yPos);\n' +
+'        line.setAttribute("stroke", "#334155"); line.setAttribute("stroke-dasharray", "3,3");\n' +
+'        svg.appendChild(line);\n' +
+'\n' +
+'        var txt = document.createElementNS("http://www.w3.org/2000/svg", "text");\n' +
+'        txt.setAttribute("x", padL - 4); txt.setAttribute("y", yPos + 3);\n' +
+'        txt.setAttribute("fill", "#64748b"); txt.setAttribute("font-size", "9px");\n' +
+'        txt.setAttribute("text-anchor", "end");\n' +
+'        txt.textContent = "₹" + Math.round(yVal);\n' +
+'        svg.appendChild(txt);\n' +
+'      }\n' +
+'\n' +
+'      function drawLine(pts, color, name) {\n' +
+'        var d = "";\n' +
+'        var dots = [];\n' +
+'        for (var j = 0; j < pts.length; j++) {\n' +
+'          var x = padL + (j / (pts.length - 1)) * plotW;\n' +
+'          var y = padT + plotH - ((pts[j] - minVal) / (maxVal - minVal)) * plotH;\n' +
+'          dots.push({ x: x, y: y, val: pts[j], lbl: labels[j] });\n' +
+'          d += (j === 0 ? "M " : " L ") + x.toFixed(1) + " " + y.toFixed(1);\n' +
+'        }\n' +
+'        var path = document.createElementNS("http://www.w3.org/2000/svg", "path");\n' +
+'        path.setAttribute("d", d);\n' +
+'        path.setAttribute("fill", "none");\n' +
+'        path.setAttribute("stroke", color);\n' +
+'        path.setAttribute("stroke-width", "2.5");\n' +
+'        path.setAttribute("stroke-linejoin", "round");\n' +
+'        svg.appendChild(path);\n' +
+'\n' +
+'        dots.forEach(function(p) {\n' +
+'          var c = document.createElementNS("http://www.w3.org/2000/svg", "circle");\n' +
+'          c.setAttribute("cx", p.x.toFixed(1));\n' +
+'          c.setAttribute("cy", p.y.toFixed(1));\n' +
+'          c.setAttribute("r", "3.5");\n' +
+'          c.setAttribute("fill", color);\n' +
+'          c.setAttribute("stroke", "#0f172a");\n' +
+'          c.setAttribute("stroke-width", "1.5");\n' +
+'          c.style.cursor = "pointer";\n' +
+'          c.onmouseover = function() {\n' +
+'            document.getElementById("hover-val").innerHTML = "<span style=\'color:" + color + "\'>" + name + " " + p.lbl + ": ₹" + p.val.toFixed(2) + "</span>";\n' +
+'            c.setAttribute("r", "5.5");\n' +
+'          };\n' +
+'          c.onmouseout = function() { c.setAttribute("r", "3.5"); };\n' +
+'          svg.appendChild(c);\n' +
+'        });\n' +
+'      }\n' +
+'\n' +
+'      if (mode === "both" || mode === "comp") drawLine(ptsA, "#38bdf8", "Trk A");\n' +
+'      if (mode === "both" || mode === "harv") drawLine(ptsB, "#34d399", "Trk B");\n' +
+'\n' +
+'      // X-Axis Labels\n' +
+'      for (var k = 0; k < labels.length; k++) {\n' +
+'        var xP = padL + (k / (labels.length - 1)) * plotW;\n' +
+'        var t = document.createElementNS("http://www.w3.org/2000/svg", "text");\n' +
+'        t.setAttribute("x", xP.toFixed(1)); t.setAttribute("y", h - 6);\n' +
+'        t.setAttribute("fill", "#64748b"); t.setAttribute("font-size", "9px");\n' +
+'        t.setAttribute("text-anchor", "middle");\n' +
+'        t.textContent = labels[k];\n' +
+'        svg.appendChild(t);\n' +
+'      }\n' +
 '    }\n' +
 '\n' +
 '    function switchSeries(mode) {\n' +
@@ -603,7 +685,7 @@ function getStudioHtml_() {
 '      document.getElementById("btn-both").className = (mode === "both") ? "active" : "";\n' +
 '      document.getElementById("btn-comp").className = (mode === "comp") ? "active" : "";\n' +
 '      document.getElementById("btn-harv").className = (mode === "harv") ? "active" : "";\n' +
-'      if (globalData) renderChart(globalData, mode);\n' +
+'      if (globalData) renderSvgChart(globalData, mode);\n' +
 '    }\n' +
 '  </script>\n' +
 '</body>\n' +
