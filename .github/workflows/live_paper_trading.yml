@@ -1,9 +1,10 @@
 name: DeltaUno Live NSE Paper Trading (Dual-Mode)
 
 on:
-  # Automatically launches every NSE weekday (Mon-Fri) at 03:42 UTC (09:12 IST)
+  # Automatically launches every NSE weekday (Mon-Fri) at 03:20 UTC (08:50 IST)
+  # Provides 25-minute buffer against GitHub Actions queue delays before 09:15 market open
   schedule:
-    - cron: "42 3 * * 1-5"
+    - cron: "20 3 * * 1-5"
 
   # Allows instant manual test or custom session trigger from GitHub Actions UI
   workflow_dispatch:
