@@ -19,7 +19,7 @@
     "disable_afternoon_entries": false
   },
   "timing_guards": {
-    "trading_window_morning_start": "09:30:00",
+    "trading_window_morning_start": "09:35:00",
     "trading_window_morning_end": "11:00:00",
     "trading_window_afternoon_start": "13:30:00",
     "trading_window_afternoon_end": "14:15:00",

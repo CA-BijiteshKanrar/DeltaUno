@@ -215,6 +215,22 @@ class LiveQuoteProvider:
             print(f"[WARN] Broker provider '{self.provider}' error ({e}); falling back to Yahoo Live.", flush=True)
         return self._fetch_yahoo()
 
+    def fetch_nifty_quote(self) -> Optional[Tuple[str, float, float]]:
+        """Fetch NIFTY 50 index benchmark. Returns (csv_line, ltp, ret_pct) or None."""
+        try:
+            url = "https://query1.finance.yahoo.com/v8/finance/chart/%5ENSEI?range=1d&interval=1m"
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
+            with urllib.request.urlopen(req, timeout=2.5) as resp:
+                res = json.loads(resp.read().decode("utf-8"))["chart"]["result"][0]["meta"]
+            ltp = float(res.get("regularMarketPrice", 22500.0))
+            prev_close = float(res.get("chartPreviousClose", ltp))
+            ret_pct = ((ltp - prev_close) / prev_close) * 100.0 if prev_close > 0 else 0.0
+            ts_ns = time.time_ns()
+            line = f"{ts_ns},999999,NIFTY,{ltp:.2f},1,100000,{ltp:.2f},100,{ltp+0.05:.2f},100,{prev_close*1.1:.2f},{prev_close*0.9:.2f}"
+            return line, ltp, ret_pct
+        except Exception:
+            return None
+
     def _format_l2_csv_line(
         self,
         ts_ns: int,
@@ -629,6 +645,10 @@ class GoogleSheetsLiveSync:
         self.ticks_streamed = 0
         self.latest_quotes: List[Dict[str, Any]] = []
 
+        self.nifty_ltp: float = 0.0
+        self.nifty_ret_pct: float = 0.0
+        self.macro_regime: str = "BULLISH / NEUTRAL"
+
         self.tracks: Dict[str, Dict[str, Any]] = {
             "COMPOUNDER": {"equity": float(initial_comp_equity), "pnl": float(initial_comp_equity - 10000.0), "trades": 0, "wins": 0, "open_pos": "FLAT"},
             "HARVESTER": {"equity": float(initial_harv_equity), "pnl": float(initial_harv_equity - 10000.0), "trades": 0, "wins": 0, "open_pos": "FLAT"},
@@ -638,11 +658,20 @@ class GoogleSheetsLiveSync:
     def enabled(self) -> bool:
         return bool(self.webhook_url and self.webhook_url.startswith("https://"))
 
+    def set_nifty_regime(self, ltp: float, ret_pct: float) -> None:
+        with self.lock:
+            self.nifty_ltp = ltp
+            self.nifty_ret_pct = ret_pct
+            if ret_pct <= -0.35:
+                self.macro_regime = f"BEARISH ({ret_pct:+.2f}%) [LONGS FROZEN]"
+            else:
+                self.macro_regime = f"BULLISH / NEUTRAL ({ret_pct:+.2f}%)"
+
     def update_quotes(self, csv_lines: List[str], add_ticks: int = 0) -> None:
         parsed = []
         for line in csv_lines:
             cols = line.split(",")
-            if len(cols) < 12:
+            if len(cols) < 12 or cols[1] == "999999" or cols[2] == "NIFTY":
                 continue
             parsed.append(
                 {
@@ -670,6 +699,8 @@ class GoogleSheetsLiveSync:
             "status": status,
             "ticks": self.ticks_streamed,
             "mode": self.mode,
+            "nifty_str": f"{self.nifty_ltp:.2f} ({self.nifty_ret_pct:+.2f}%)" if self.nifty_ltp > 0 else "N/A",
+            "macro_regime": self.macro_regime,
             "comp_equity": round(c["equity"], 2),
             "comp_pnl": round(c["pnl"], 2),
             "comp_ret_pct": f"{(c['pnl'] / 10000.0) * 100.0:+.2f}%",
@@ -983,6 +1014,11 @@ def main() -> int:
                         break
 
                 tick_lines = provider.fetch_all_ticks()
+                nifty_res = provider.fetch_nifty_quote()
+                if nifty_res:
+                    n_line, n_ltp, n_ret = nifty_res
+                    tick_lines.append(n_line)
+                    sheets_sync.set_nifty_regime(n_ltp, n_ret)
                 for line in tick_lines:
                     f.write(line + "\n")
                 f.flush()

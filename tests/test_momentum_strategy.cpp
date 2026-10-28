@@ -127,10 +127,56 @@ void test_daily_session_rollover_reset() {
     std::cout << "[PASS] test_daily_session_rollover_reset\n";
 }
 
+void test_macro_regime_and_vwap_shield() {
+    strategy::MomentumBreakoutStrategy strat(2.5, 0.55);
+    market::OrderBook book(349121, "TATASTEEL");
+
+    // 1. Send NIFTY open tick at 22,700
+    core::MarketTick nifty_t1{};
+    nifty_t1.token = 999999;
+    core::copy_fixed_str(nifty_t1.symbol, "NIFTY");
+    nifty_t1.last_price = core::to_paise(22700.0);
+    strat.on_tick(nifty_t1, book);
+    DU_EXPECT(!strat.is_macro_bearish());
+    DU_EXPECT_NEAR(strat.nifty_return_pct(), 0.0, 0.01);
+
+    // 2. NIFTY drops to 22,550 (-0.66% sell-off)
+    core::MarketTick nifty_t2 = nifty_t1;
+    nifty_t2.last_price = core::to_paise(22550.0);
+    strat.on_tick(nifty_t2, book);
+    DU_EXPECT(strat.is_macro_bearish());
+    DU_EXPECT(strat.nifty_return_pct() < -0.35);
+
+    // 3. Even with huge volume surge and OFI on TATASTEEL, signal must be vetoed by macro gate
+    for (int i = 0; i < 20; ++i) {
+        core::MarketTick t{};
+        t.token = 349121;
+        core::copy_fixed_str(t.symbol, "TATASTEEL");
+        t.last_price = core::to_paise(150.0);
+        t.last_quantity = 1000;
+        t.total_volume = 100000 + (i + 1) * 1000;
+        t.bids[0] = {core::to_paise(149.95), 5000, 10};
+        t.asks[0] = {core::to_paise(150.05), 100, 1};
+        book.on_tick(t);
+        strat.on_tick(t, book);
+    }
+    const auto sig = strat.generate_signal(book);
+    DU_EXPECT(!sig.has_value()); // Blocked by macro regime!
+
+    // 4. Recover NIFTY back to flat (22,710)
+    core::MarketTick nifty_t3 = nifty_t1;
+    nifty_t3.last_price = core::to_paise(22710.0);
+    strat.on_tick(nifty_t3, book);
+    DU_EXPECT(!strat.is_macro_bearish());
+
+    std::cout << "[PASS] test_macro_regime_and_vwap_shield\n";
+}
+
 int main() {
     std::cout << "Running MomentumBreakoutStrategy tests...\n";
     test_per_symbol_vwap_and_volume_isolation();
     test_daily_session_rollover_reset();
+    test_macro_regime_and_vwap_shield();
     std::cout << "All MomentumBreakoutStrategy tests passed!\n";
     return 0;
 }

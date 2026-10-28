@@ -86,6 +86,21 @@ public:
     }
 
     void on_tick(const core::MarketTick& tick, const market::OrderBook& book) override {
+        // Intercept Macro Benchmark Tick (NIFTY 50: token 999999 or symbol "NIFTY")
+        if (tick.token == 999999 || std::string_view(tick.symbol) == "NIFTY") {
+            if (nifty_open_paise_ == 0 && tick.last_price > 0) {
+                nifty_open_paise_ = tick.last_price;
+            }
+            nifty_last_paise_ = tick.last_price;
+            if (nifty_open_paise_ > 0) {
+                nifty_return_pct_ = (static_cast<double>(nifty_last_paise_ - nifty_open_paise_) /
+                                     static_cast<double>(nifty_open_paise_)) * 100.0;
+                // If NIFTY is down > 0.35% from open, mark regime as macro bearish
+                is_macro_bearish_ = (nifty_return_pct_ <= -0.35);
+            }
+            return;
+        }
+
         SymbolIndicatorState& state = symbol_states_[tick.token];
         if (state.token == 0) {
             state.token = tick.token;
@@ -127,6 +142,11 @@ public:
     }
 
     [[nodiscard]] std::optional<core::TradingSignal> generate_signal(const market::OrderBook& book) override {
+        // 0. Macro Market Regime Gate: Veto new long breakouts if NIFTY is in heavy sell-off
+        if (is_macro_bearish_) {
+            return std::nullopt;
+        }
+
         if (whitelist_.find(book.symbol()) == whitelist_.end()) {
             return std::nullopt;
         }
@@ -175,8 +195,13 @@ public:
                 tick_size_paise_ * 4,
                 static_cast<core::Price>(static_cast<double>(book.best_ask()) * 0.0020));
             const bool has_tight_spread = (book.spread() >= 0 && book.spread() <= max_allowed_spread);
+            // Statistically Valid VWAP Shield: Require established volume before honoring VWAP
+            const bool has_established_vwap = (state.cumulative_volume >= 10000 && vwap > 0);
+            if (has_established_vwap && book.best_bid() < vwap) {
+                return std::nullopt; // Strictly veto buying below established institutional VWAP
+            }
             const bool is_above_vwap =
-                (vwap == 0) ||
+                !has_established_vwap ||
                 (book.best_bid() >= vwap && static_cast<double>(book.best_ask()) <= static_cast<double>(vwap) * 1.025);
 
             if (has_volume_surge && has_ofi_support && has_microprice_support &&
@@ -204,7 +229,13 @@ public:
         // Compounder Mode (Default): Top-5 Order Book Depth Imbalance + Configurable TP/SL
         const double depth_ratio = book.top5_bid_to_ask_depth_ratio();
         const bool has_depth_support = (depth_ratio >= min_bid_depth_ratio_);
-        const bool is_above_vwap = (vwap == 0) || (book.best_bid() >= vwap);
+
+        // Statistically Valid VWAP Shield: Require established volume before honoring VWAP
+        const bool has_established_vwap = (state.cumulative_volume >= 10000 && vwap > 0);
+        if (has_established_vwap && book.best_bid() < vwap) {
+            return std::nullopt; // Strictly veto buying below established institutional VWAP
+        }
+        const bool is_above_vwap = !has_established_vwap || (book.best_bid() >= vwap);
 
         if (has_volume_surge && has_ofi_support && has_depth_support && is_above_vwap && book.best_ask() > 0) {
             core::TradingSignal sig{};
@@ -299,6 +330,22 @@ public:
         for (auto& [token, state] : symbol_states_) {
             state.reset_session();
         }
+        nifty_open_paise_ = 0;
+        nifty_last_paise_ = 0;
+        nifty_return_pct_ = 0.0;
+        is_macro_bearish_ = false;
+    }
+
+    [[nodiscard]] double nifty_return_pct() const noexcept { return nifty_return_pct_; }
+    [[nodiscard]] bool is_macro_bearish() const noexcept { return is_macro_bearish_; }
+    void set_macro_benchmark(core::Price open_paise, core::Price last_paise) noexcept {
+        nifty_open_paise_ = open_paise;
+        nifty_last_paise_ = last_paise;
+        if (nifty_open_paise_ > 0) {
+            nifty_return_pct_ = (static_cast<double>(nifty_last_paise_ - nifty_open_paise_) /
+                                 static_cast<double>(nifty_open_paise_)) * 100.0;
+            is_macro_bearish_ = (nifty_return_pct_ <= -0.35);
+        }
     }
 
     [[nodiscard]] const SymbolIndicatorState* get_symbol_state(uint32_t token) const noexcept {
@@ -332,6 +379,11 @@ private:
     std::unordered_map<std::string, uint32_t> symbol_to_token_;
     uint32_t last_active_token_{0};
     uint32_t session_wins_{0};
+
+    core::Price nifty_open_paise_{0};
+    core::Price nifty_last_paise_{0};
+    double nifty_return_pct_{0.0};
+    bool is_macro_bearish_{false};
 };
 
 } // namespace deltauno::strategy
