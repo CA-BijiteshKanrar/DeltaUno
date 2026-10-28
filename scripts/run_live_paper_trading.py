@@ -1003,8 +1003,12 @@ def main() -> int:
 
     now_ist = datetime.now(TZ_IST)
     today_iso = now_ist.strftime("%Y-%m-%d")
-    if not args.start_now and GoogleSheetsLiveSync.has_completed_session_today(sheet_id, today_iso):
-        print(f"[SKIP] Full trading session already recorded in Daily_Summary for {today_iso}. Exiting duplicate scheduled run cleanly.")
+    is_full_session = (not args.start_now) or (args.max_runtime_minutes >= 60.0)
+    if is_full_session and GoogleSheetsLiveSync.has_completed_session_today(sheet_id, today_iso):
+        print(f"[SKIP] Full trading session already recorded in Daily_Summary for {today_iso}. Exiting duplicate run cleanly.")
+        return 0
+    if not args.start_now and (now_ist.hour > 14 or (now_ist.hour == 14 and now_ist.minute >= 45)):
+        print(f"[SKIP] Scheduled cron woke up late ({now_ist.strftime('%H:%M:%S IST')}, past 14:45 IST entry window). Skipping late run.")
         return 0
     date_tag = now_ist.strftime("%Y%m%d")
     live_csv = REPO_ROOT / "data" / f"live_ticks_{date_tag}.csv"

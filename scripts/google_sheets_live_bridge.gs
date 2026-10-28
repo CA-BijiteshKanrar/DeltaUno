@@ -25,7 +25,86 @@ function onOpen() {
     .addItem("📊 Refresh Charts & Analytics", "createAnalyticsCharts")
     .addItem("🔄 Reconcile Multi-Day Balances", "reconcileMultiDayBalances")
     .addItem("📈 Open Analytics Sidebar", "openInteractiveStudio")
+    .addSeparator()
+    .addItem("⚡ Launch Bot on GitHub Now", "triggerGitHubWorkflow")
+    .addItem("⏰ Enable 09:05 AM Cloud Auto-Launcher", "installMorningAutoTrigger")
     .addToUi();
+}
+
+/**
+ * Triggers GitHub Actions workflow_dispatch (bypasses GitHub cron queue delays).
+ * Uses GITHUB_PAT stored in ScriptProperties.
+ */
+function triggerGitHubWorkflow() {
+  var props = PropertiesService.getScriptProperties();
+  var token = props.getProperty("GITHUB_PAT");
+  if (!token) {
+    var ui = SpreadsheetApp.getUi();
+    var res = ui.prompt("GitHub Token Setup", "Enter your GitHub Personal Access Token (stored privately in ScriptProperties):", ui.ButtonSet.OK_CANCEL);
+    if (res.getSelectedButton() !== ui.Button.OK || !res.getResponseText().trim()) return;
+    token = res.getResponseText().trim();
+    props.setProperty("GITHUB_PAT", token);
+  }
+  var url = "https://api.github.com/repos/CA-BijiteshKanrar/DeltaUno/actions/workflows/live_paper_trading.yml/dispatches";
+  var payload = {
+    ref: "main",
+    inputs: { mode: "both", provider: "auto", start_now: "true", max_runtime_minutes: "350" }
+  };
+  var resp = UrlFetchApp.fetch(url, {
+    method: "post",
+    contentType: "application/json",
+    headers: {
+      "Authorization": "Bearer " + token,
+      "Accept": "application/vnd.github+json",
+      "User-Agent": "DeltaUno-Sheets-CloudTrigger"
+    },
+    payload: JSON.stringify(payload),
+    muteHttpExceptions: true
+  });
+  try {
+    SpreadsheetApp.getActiveSpreadsheet().toast("GitHub Actions bot launched (HTTP " + resp.getResponseCode() + ")", "🚀 DeltaUno AI", 5);
+  } catch (e) {}
+}
+
+/**
+ * Daily 09:05 AM IST Cloud Trigger handler (Mon-Fri only).
+ */
+function autoMorningGitHubDispatch() {
+  var now = new Date();
+  var day = now.getDay(); // 0=Sun, 6=Sat
+  if (day === 0 || day === 6) return;
+  var props = PropertiesService.getScriptProperties();
+  var token = props.getProperty("GITHUB_PAT");
+  if (!token) return;
+  // Check if a run is already active today
+  var runsResp = UrlFetchApp.fetch("https://api.github.com/repos/CA-BijiteshKanrar/DeltaUno/actions/runs?per_page=5", {
+    headers: { "User-Agent": "DeltaUno-Sheets-CloudTrigger" },
+    muteHttpExceptions: true
+  });
+  if (runsResp.getResponseCode() === 200) {
+    var runs = JSON.parse(runsResp.getContentText()).workflow_runs || [];
+    for (var i = 0; i < runs.length; i++) {
+      if (runs[i].status === "in_progress" || runs[i].status === "queued") return;
+    }
+  }
+  triggerGitHubWorkflow();
+}
+
+function installMorningAutoTrigger() {
+  var triggers = ScriptApp.getProjectTriggers();
+  for (var i = 0; i < triggers.length; i++) {
+    if (triggers[i].getHandlerFunction() === "autoMorningGitHubDispatch") {
+      ScriptApp.deleteTrigger(triggers[i]);
+    }
+  }
+  ScriptApp.newTrigger("autoMorningGitHubDispatch")
+    .timeBased()
+    .everyDays(1)
+    .atHour(9)
+    .nearMinute(5)
+    .inTimezone("Asia/Kolkata")
+    .create();
+  SpreadsheetApp.getActiveSpreadsheet().toast("Daily 09:05 AM IST Cloud Auto-Launcher enabled!", "⏰ DeltaUno AI", 5);
 }
 
 function ensureSheet_(ss, name, headers) {

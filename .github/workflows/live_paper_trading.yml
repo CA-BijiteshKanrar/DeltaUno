@@ -1,12 +1,14 @@
 name: DeltaUno Live NSE Paper Trading (Dual-Mode)
 
 on:
-  # Automatically launches every NSE weekday (Mon-Fri) at 03:20 UTC (08:50 IST)
-  # Provides 25-minute buffer against GitHub Actions queue delays before 09:15 market open
+  # Staggered off-minute weekday crons around market open to avoid GitHub's top-of-hour cron backlog
+  # Duplicate/late runs are automatically skipped by concurrency lock + Daily_Summary completion check
   schedule:
-    - cron: "20 3 * * 1-5"
+    - cron: "13 3 * * 1-5"
+    - cron: "27 3 * * 1-5"
+    - cron: "42 3 * * 1-5"
 
-  # Allows instant manual test or custom session trigger from GitHub Actions UI
+  # Allows instant manual test or automated Google Apps Script trigger
   workflow_dispatch:
     inputs:
       mode:
@@ -35,9 +37,9 @@ on:
         default: true
         type: boolean
       max_runtime_minutes:
-        description: "Max runtime in minutes before graceful EOD report (e.g. 2 for quick test, 350 for full day)"
+        description: "Max runtime in minutes before graceful EOD report (e.g. 350 for full day, 2 for quick test)"
         required: false
-        default: "2"
+        default: "350"
         type: string
 
 permissions:
@@ -85,7 +87,7 @@ jobs:
           MODE="${{ github.event.inputs.mode || 'both' }}"
           PROVIDER="${{ github.event.inputs.provider || 'auto' }}"
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            MAX_MIN="${{ github.event.inputs.max_runtime_minutes || '2' }}"
+            MAX_MIN="${{ github.event.inputs.max_runtime_minutes || '350' }}"
             if [ "${{ github.event.inputs.start_now }}" = "true" ]; then
               START_FLAG="--start-now"
             else
