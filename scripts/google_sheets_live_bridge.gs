@@ -280,24 +280,18 @@ function reconcileMultiDayBalances() {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
 
   var omniHistoricalRows = [
-    ["2026-10-26 09:36:39 IST", "GITHUB_ACTIONS", "OMNI", "BUY", "TATASTEEL", 58, 168.04, 166.55, 171.00, "", "", "", 10000.00],
-    ["2026-10-26 09:39:42 IST", "GITHUB_ACTIONS", "OMNI", "SELL", "TATASTEEL", 58, 166.52, "", "", -88.16, 3.41, -91.57, 9908.43],
-    ["2026-10-26 09:41:55 IST", "GITHUB_ACTIONS", "OMNI", "BUY", "COALINDIA", 24, 397.15, 393.75, 404.10, "", "", "", 9908.43],
-    ["2026-10-26 10:20:11 IST", "GITHUB_ACTIONS", "OMNI", "SELL", "COALINDIA", 24, 404.00, "", "", 164.40, 3.41, 160.99, 10069.42],
-    ["2026-10-26 10:20:30 IST", "GITHUB_ACTIONS", "OMNI", "SHORT", "SBIN", 10, 954.49, 962.65, 937.70, "", "", "", 10069.42],
-    ["2026-10-26 11:41:19 IST", "GITHUB_ACTIONS", "OMNI", "COVER", "SBIN", 10, 953.83, "", "", 6.60, 3.36, 3.24, 10072.66],
-    ["2026-10-26 12:32:23 IST", "GITHUB_ACTIONS", "OMNI", "BUY", "ZOMATO", 30, 324.24, 321.45, 329.95, "", "", "", 10072.66],
-    ["2026-10-26 13:06:10 IST", "GITHUB_ACTIONS", "OMNI", "SELL", "ZOMATO", 30, 324.46, "", "", 6.60, 3.43, 3.17, 10075.83],
-    ["2026-10-26 13:10:54 IST", "GITHUB_ACTIONS", "OMNI", "SHORT", "SBIN", 10, 953.89, 962.05, 937.10, "", "", "", 10075.83],
-    ["2026-10-26 15:05:02 IST", "GITHUB_ACTIONS", "OMNI", "COVER", "SBIN", 10, 956.51, "", "", -26.20, 3.36, -29.56, 10046.27],
-    ["2026-10-27 09:48:52 IST", "GITHUB_ACTIONS", "OMNI", "BUY", "ITC", 37, 260.49, 258.20, 265.05, "", "", "", 10046.27],
-    ["2026-10-27 11:01:18 IST", "GITHUB_ACTIONS", "OMNI", "SELL", "ITC", 37, 258.22, "", "", -83.99, 3.37, -87.36, 9958.91],
-    ["2026-10-27 11:01:32 IST", "GITHUB_ACTIONS", "OMNI", "SHORT", "COALINDIA", 24, 402.95, 406.40, 395.85, "", "", "", 9958.91],
-    ["2026-10-27 15:05:01 IST", "GITHUB_ACTIONS", "OMNI", "COVER", "COALINDIA", 24, 399.00, "", "", 94.80, 3.40, 91.40, 10050.30],
-    ["2026-10-28 09:35:01 IST", "GITHUB_ACTIONS", "OMNI", "BUY", "SBIN", 10, 952.80, 944.70, 969.50, "", "", "", 10050.30],
-    ["2026-10-28 12:10:02 IST", "GITHUB_ACTIONS", "OMNI", "SELL", "SBIN", 10, 953.85, "", "", 10.50, 3.36, 7.14, 10057.44],
-    ["2026-10-28 13:15:07 IST", "GITHUB_ACTIONS", "OMNI", "BUY", "SBIN", 10, 955.55, 947.40, 972.30, "", "", "", 10057.44],
-    ["2026-10-28 15:05:02 IST", "GITHUB_ACTIONS", "OMNI", "SELL", "SBIN", 10, 958.00, "", "", 24.50, 3.37, 21.13, 10078.56]
+    ["2026-10-26 09:37:11 IST", "GITHUB_ACTIONS", "OMNI", "BUY", "TATASTEEL", 58, 166.88, 165.40, 169.85, "", "", "", 10000.00],
+    ["2026-10-26 13:07:50 IST", "GITHUB_ACTIONS", "OMNI", "SELL", "TATASTEEL", 58, 167.18, "", "", 17.40, 3.42, 13.98, 10013.98],
+    ["2026-10-26 13:21:28 IST", "GITHUB_ACTIONS", "OMNI", "BUY", "SBIN", 10, 955.32, 947.15, 972.10, "", "", "", 10013.98],
+    ["2026-10-26 15:05:02 IST", "GITHUB_ACTIONS", "OMNI", "SELL", "SBIN", 10, 956.06, "", "", 7.40, 3.37, 4.03, 10018.01],
+    ["2026-10-27 09:50:02 IST", "GITHUB_ACTIONS", "OMNI", "BUY", "TATASTEEL", 57, 170.67, 169.15, 173.70, "", "", "", 10018.01],
+    ["2026-10-27 09:53:09 IST", "GITHUB_ACTIONS", "OMNI", "SHORT", "ITC", 37, 259.17, 261.40, 254.60, "", "", "", 10018.01],
+    ["2026-10-27 11:22:28 IST", "GITHUB_ACTIONS", "OMNI", "SELL", "TATASTEEL", 57, 170.88, "", "", 11.97, 3.43, 8.54, 10026.55],
+    ["2026-10-27 13:54:20 IST", "GITHUB_ACTIONS", "OMNI", "BUY", "ZOMATO", 30, 326.79, 323.95, 332.55, "", "", "", 10026.55],
+    ["2026-10-27 15:05:01 IST", "GITHUB_ACTIONS", "OMNI", "COVER", "ITC", 37, 256.68, "", "", 92.13, 3.37, 88.76, 10115.31],
+    ["2026-10-27 15:05:01 IST", "GITHUB_ACTIONS", "OMNI", "SELL", "ZOMATO", 30, 328.81, "", "", 60.60, 3.47, 57.13, 10172.44],
+    ["2026-10-28 09:38:44 IST", "GITHUB_ACTIONS", "OMNI", "BUY", "ITC", 38, 254.24, 252.00, 258.70, "", "", "", 10172.44],
+    ["2026-10-28 15:05:02 IST", "GITHUB_ACTIONS", "OMNI", "SELL", "ITC", 38, 258.02, "", "", 143.64, 3.45, 140.19, 10312.63]
   ];
 
   // 1. Reconcile Live_Trades (remove any old OMNI rows to avoid duplicates, merge & sort chronologically)
@@ -362,9 +356,9 @@ function reconcileMultiDayBalances() {
     ];
     var reconciledRows = [
       headers,
-      ["2026-10-26", "GITHUB_ACTIONS", "ANGELONE", 60255, 10155.12, 155.12, 1.55, 2, 50.0, 10017.29, 17.30, 0.17, 3, 100.0, 10046.27, 46.27, 0.46, 5, 60.0],
-      ["2026-10-27", "GITHUB_ACTIONS", "UPSTOX",   78205, 10107.49, -47.63, -0.47, 2, 50.0,  9976.19, -41.11, -0.41, 3, 66.7, 10050.30,  4.03, 0.04, 2, 50.0],
-      ["2026-10-28", "GITHUB_ACTIONS", "UPSTOX",   79460, 10148.51,  41.02,  0.41, 2, 100.0, 9940.15, -36.04, -0.36, 3, 66.7, 10078.56, 28.26, 0.28, 2, 100.0]
+      ["2026-10-26", "GITHUB_ACTIONS", "ANGELONE", 60255, 10155.12, 155.12, 1.55, 2, 50.0, 10017.29, 17.30, 0.17, 3, 100.0, 10018.01,  18.01, 0.18, 2, 100.0],
+      ["2026-10-27", "GITHUB_ACTIONS", "UPSTOX",   78205, 10107.49, -47.63, -0.47, 2, 50.0,  9976.19, -41.11, -0.41, 3, 66.7, 10172.44, 154.42, 1.54, 3, 100.0],
+      ["2026-10-28", "GITHUB_ACTIONS", "UPSTOX",   79460, 10148.51,  41.02,  0.41, 2, 100.0, 9940.15, -36.04, -0.36, 3, 66.7, 10312.63, 140.19, 1.38, 1, 100.0]
     ];
     summarySheet.clear();
     summarySheet.getRange(1, 1, reconciledRows.length, 19).setValues(reconciledRows);
@@ -379,10 +373,10 @@ function reconcileMultiDayBalances() {
     dashSheet.getRange(5, 1, 1, 4).setValues([["STRATEGY TRACK COMPARISON (LIVE)", "Track A: High-Yield Compounder", "Track B: L2 Microstructure Harvester", "Track C: Bi-Directional Omni (Long+Short)"]])
       .setFontWeight("bold").setBackground("#283593").setFontColor("#ffffff");
     dashSheet.getRange(6, 2, 5, 3).setValues([
-      [10148.51, 9940.15, 10078.56],
-      [148.51, -59.85, 78.56],
-      ["+1.49%", "-0.60%", "+0.79%"],
-      ["4W / 6T (2W/2T Today)", "7W / 9T (2W/3T Today)", "6W / 9T (2W/2T Today)"],
+      [10148.51, 9940.15, 10312.63],
+      [148.51, -59.85, 312.63],
+      ["+1.49%", "-0.60%", "+3.13%"],
+      ["4W / 6T (2W/2T Today)", "7W / 9T (2W/3T Today)", "6W / 6T (1W/1T Today)"],
       ["FLAT", "FLAT", "FLAT"]
     ]);
   }

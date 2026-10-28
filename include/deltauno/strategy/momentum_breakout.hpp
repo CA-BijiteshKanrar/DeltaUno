@@ -21,6 +21,7 @@ struct SymbolIndicatorState {
     std::deque<uint64_t> recent_volumes;
     double cumulative_turnover{0.0};
     uint64_t cumulative_volume{0};
+    core::Price session_open_price{0};
     core::Price prev_last_price{0};
     uint32_t consecutive_bullish_ticks{0};
     uint32_t consecutive_bearish_ticks{0};
@@ -32,6 +33,7 @@ struct SymbolIndicatorState {
         recent_volumes.clear();
         cumulative_turnover = 0.0;
         cumulative_volume = 0;
+        session_open_price = 0;
         prev_last_price = 0;
         consecutive_bullish_ticks = 0;
         consecutive_bearish_ticks = 0;
@@ -114,6 +116,9 @@ public:
         }
 
         // Track cumulative volume and turnover for session VWAP calculation (per symbol)
+        if (state.session_open_price == 0 && tick.last_price > 0) {
+            state.session_open_price = tick.last_price;
+        }
         if (tick.last_quantity > 0) {
             state.cumulative_turnover += static_cast<double>(tick.last_price) * static_cast<double>(tick.last_quantity);
             state.cumulative_volume += tick.last_quantity;
@@ -238,6 +243,9 @@ public:
         }
 
         if (mode_ == StrategyMode::OMNI) {
+            if ((!omni_allow_long_ && !omni_allow_short_) || (omni_busy_token_ != 0 && token == omni_busy_token_)) {
+                return std::nullopt;
+            }
             // Track C (Bi-Directional Omni): Continuous 09:35-14:45 Window + High-Conviction Midday Tier + Long/Short
             if (state.last_exit_time_ns > 0 && book.last_tick_time_ns() > state.last_exit_time_ns) {
                 const uint64_t elapsed_ns = book.last_tick_time_ns() - state.last_exit_time_ns;
@@ -258,8 +266,8 @@ public:
 
             const bool has_established_vwap = (state.cumulative_volume >= 10000 && vwap > 0);
 
-            // Path 1: LONG Breakout (Allowed when NIFTY is not in bearish sell-off)
-            if (!is_macro_bearish_ && ofi >= req_ofi && book.best_ask() > 0) {
+            // Path 1: LONG Breakout (Cont 2014 + Almgren-Chriss 2000 Top-of-Book Liquidity Gate + Stoikov 2018 VWAP/Microprice)
+            if (omni_allow_long_ && !is_macro_bearish_ && ofi >= req_ofi && book.best_ask() > 0 && book.best_ask_qty() >= 50) {
                 const bool above_vwap = !has_established_vwap || (book.best_bid() >= vwap);
                 const bool bid_depth_ok = (book.top5_bid_to_ask_depth_ratio() >= req_depth);
                 const bool micro_ok = (book.weighted_mid_price() >= book.mid_price());
@@ -283,9 +291,15 @@ public:
                 }
             }
 
-            // Path 2: SHORT Breakdown (Allowed when NIFTY is bearish OR stock shows severe L2 distribution below VWAP)
+            // Path 2: SHORT Breakdown (Gao et al. 2018 & Moskowitz et al. 2012 Negative Time-Series Momentum: fresh breakdown below Open & VWAP)
             const double short_req_ofi = is_macro_bearish_ ? req_ofi : std::max(0.65, req_ofi);
-            if (has_established_vwap && ofi <= -short_req_ofi && book.best_bid() > 0 && book.best_ask() <= vwap) {
+            const bool is_red_on_day = (state.session_open_price > 0) &&
+                (book.best_bid() < state.session_open_price) &&
+                (static_cast<double>(book.best_bid()) >= static_cast<double>(state.session_open_price) * 0.9955);
+            const bool not_overextended_down = !has_established_vwap ||
+                (static_cast<double>(book.best_bid()) >= static_cast<double>(vwap) * 0.9950);
+            if (omni_allow_short_ && has_established_vwap && is_red_on_day && not_overextended_down &&
+                ofi <= -short_req_ofi && book.best_bid() > 0 && book.best_bid_qty() >= 50 && book.best_ask() <= vwap) {
                 const bool ask_depth_ok = (book.top5_ask_to_bid_depth_ratio() >= req_depth);
                 const bool micro_bearish = (book.weighted_mid_price() <= book.mid_price());
                 if (ask_depth_ok && micro_bearish && state.consecutive_bearish_ticks >= 1) {
@@ -409,6 +423,12 @@ public:
         return 0.0;
     }
 
+    void set_omni_slot_availability(bool allow_long, bool allow_short, uint32_t busy_token = 0) noexcept {
+        omni_allow_long_ = allow_long;
+        omni_allow_short_ = allow_short;
+        omni_busy_token_ = busy_token;
+    }
+
     void reset_daily_session() noexcept {
         session_wins_ = 0;
         for (auto& [token, state] : symbol_states_) {
@@ -468,6 +488,9 @@ private:
     core::Price nifty_last_paise_{0};
     double nifty_return_pct_{0.0};
     bool is_macro_bearish_{false};
+    bool omni_allow_long_{true};
+    bool omni_allow_short_{true};
+    uint32_t omni_busy_token_{0};
 };
 
 } // namespace deltauno::strategy
