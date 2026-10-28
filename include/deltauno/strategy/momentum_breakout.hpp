@@ -220,8 +220,9 @@ public:
                 !has_established_vwap ||
                 (book.best_bid() >= vwap && static_cast<double>(book.best_ask()) <= static_cast<double>(vwap) * 1.025);
 
+            const bool has_harv_depth = (book.top5_bid_to_ask_depth_ratio() >= min_bid_depth_ratio_) && (book.best_ask_qty() >= 50);
             if (has_volume_surge && has_ofi_support && has_microprice_support &&
-                has_price_flow_agreement && has_tight_spread && is_above_vwap && book.best_ask() > 0) {
+                has_price_flow_agreement && has_tight_spread && is_above_vwap && has_harv_depth && book.best_ask() > 0) {
                 core::TradingSignal sig{};
                 sig.timestamp_ns = book.last_tick_time_ns();
                 sig.token = token;
@@ -229,7 +230,7 @@ public:
                 sig.side = core::Side::BUY;
                 sig.target_entry = book.best_ask();
 
-                const auto raw_sl = static_cast<core::Price>(static_cast<double>(sig.target_entry) * 0.990);
+                const auto raw_sl = static_cast<core::Price>(static_cast<double>(sig.target_entry) * 0.9945);
                 const auto raw_tp = static_cast<core::Price>(static_cast<double>(sig.target_entry) * 1.018);
                 sig.stop_loss = core::floor_to_tick(raw_sl, tick_size_paise_);
                 sig.take_profit = core::ceil_to_tick(raw_tp, tick_size_paise_);

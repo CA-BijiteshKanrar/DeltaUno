@@ -92,6 +92,52 @@ INSTRUMENTS = [
         "yahoo_ticker": "ETERNAL.NS",
         "ref_price": 250.00,
     },
+    # High-Beta Nifty 50 / Next 50 F&O Momentum Leaders (Gao et al. 2018 §4.3 High-ATR Universe)
+    {
+        "symbol": "TATAMOTORS",
+        "deltauno_token": 884737,
+        "zerodha_key": "NSE:TATAMOTORS",
+        "upstox_key": "NSE_EQ|INE155A01022",
+        "angel_token": "3456",
+        "yahoo_ticker": "TATAMOTORS.NS",
+        "ref_price": 680.00,
+    },
+    {
+        "symbol": "BEL",
+        "deltauno_token": 98049,
+        "zerodha_key": "NSE:BEL",
+        "upstox_key": "NSE_EQ|INE263A01024",
+        "angel_token": "383",
+        "yahoo_ticker": "BEL.NS",
+        "ref_price": 380.00,
+    },
+    {
+        "symbol": "TRENT",
+        "deltauno_token": 502785,
+        "zerodha_key": "NSE:TRENT",
+        "upstox_key": "NSE_EQ|INE849A01020",
+        "angel_token": "1964",
+        "yahoo_ticker": "TRENT.NS",
+        "ref_price": 5200.00,
+    },
+    {
+        "symbol": "DLF",
+        "deltauno_token": 3771393,
+        "zerodha_key": "NSE:DLF",
+        "upstox_key": "NSE_EQ|INE271C01023",
+        "angel_token": "14732",
+        "yahoo_ticker": "DLF.NS",
+        "ref_price": 750.00,
+    },
+    {
+        "symbol": "HINDALCO",
+        "deltauno_token": 348929,
+        "zerodha_key": "NSE:HINDALCO",
+        "upstox_key": "NSE_EQ|INE038A01020",
+        "angel_token": "1363",
+        "yahoo_ticker": "HINDALCO.NS",
+        "ref_price": 650.00,
+    },
 ]
 
 
@@ -639,7 +685,7 @@ def run_connection_test(provider_arg: str) -> int:
     lines = provider.fetch_all_ticks()
     elapsed_ms = (time.perf_counter() - t0) * 1000.0
 
-    print(f"  Fetched {len(lines)}/5 NSE Whitelisted Instruments in {elapsed_ms:.1f} ms:")
+    print(f"  Fetched {len(lines)}/{len(INSTRUMENTS)} NSE Whitelisted Instruments in {elapsed_ms:.1f} ms:")
     print("-" * 94)
     print(f"  {'Symbol':<11} | {'Token':<8} | {'LTP (INR)':<10} | {'Best Bid (Qty)':<16} | {'Best Ask (Qty)':<16} | {'Circuit Band (LC - UC)'}")
     print("-" * 94)
@@ -655,7 +701,7 @@ def run_connection_test(provider_arg: str) -> int:
             f"  {sym:<11} | {tok:<8} | {ltp:>10} | {b0_p:>7} ({b0_q:>5}) | {a0_p:>7} ({a0_q:>5}) | {lc} - {uc}"
         )
     print("=" * 94)
-    return 0 if len(lines) == 5 else 1
+    return 0 if len(lines) == len(INSTRUMENTS) else 1
 
 
 class GoogleSheetsLiveSync:

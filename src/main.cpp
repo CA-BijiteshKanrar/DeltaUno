@@ -71,9 +71,9 @@ int main(int argc, char* argv[]) {
             cli_webhook_json = argv[++i];
         } else if (arg == "--mode" && i + 1 < argc) {
             run_mode = argv[++i];
-        } else if (arg == "--capital" && i + 1 < argc) {
+        } else if ((arg == "--capital" || arg == "--compounder-capital") && i + 1 < argc) {
             initial_capital_override = std::stod(argv[++i]);
-        } else if (arg == "--harv-capital" && i + 1 < argc) {
+        } else if ((arg == "--harv-capital" || arg == "--harvester-capital") && i + 1 < argc) {
             harv_capital_override = std::stod(argv[++i]);
         } else if (arg == "--omni-capital" && i + 1 < argc) {
             omni_capital_override = std::stod(argv[++i]);
@@ -99,11 +99,7 @@ int main(int argc, char* argv[]) {
     // 2. Load Runtime Configurations (Risk Limits, Liquid Whitelist, Macro Event Calendar)
     core::RiskConfig risk_cfg = core::ConfigLoader::load_risk_config(config_dir + "/risk_limits.json");
 
-    if (initial_capital_override > 0.0) {
-
-        risk_cfg.initial_capital_inr = initial_capital_override;
-
-    }
+    const double comp_initial_cap = (initial_capital_override > 0.0) ? initial_capital_override : risk_cfg.initial_capital_inr;
     LOG_INFO("=================================================");
     LOG_INFO("   DeltaUno Low-Latency C++20 Trading Engine     ");
     {
@@ -114,7 +110,7 @@ int main(int argc, char* argv[]) {
     }
     LOG_INFO("=================================================");
     const auto instruments = core::ConfigLoader::load_instruments(config_dir + "/instruments.json");
-    const auto whitelist = core::ConfigLoader::to_whitelist_set(instruments);
+    auto whitelist = core::ConfigLoader::to_whitelist_set(instruments);
     const core::MacroCalendar macro_calendar = core::ConfigLoader::load_macro_calendar(config_dir + "/calendar_events.json");
 
     std::unordered_map<uint32_t, market::OrderBook> books;
@@ -127,8 +123,8 @@ int main(int argc, char* argv[]) {
     }
 
     // 3. Initialize Execution Gateway, Watchdog & WAL State Journal
-    execution::PaperBroker broker(risk_cfg.initial_capital_inr);
-    execution::TradeAuditor trade_auditor(risk_cfg.initial_capital_inr);
+    execution::PaperBroker broker(comp_initial_cap);
+    execution::TradeAuditor trade_auditor(comp_initial_cap);
     market::Watchdog watchdog(risk_cfg.heartbeat_timeout_seconds);
     watchdog.register_alert_callback([](const std::string& alert_msg) {
         LOG_WARN(alert_msg);
@@ -143,6 +139,24 @@ int main(int argc, char* argv[]) {
                 << " | Whitelist=" << whitelist.size() << " symbols"
                 << " | MacroEvents=" << macro_calendar.size();
         LOG_INFO(cfg_msg.str());
+    }
+
+    // Register High-Beta Nifty F&O Momentum Universe (Gao et al. 2018 §4.3 Cross-Sectional Volatility Premium)
+    {
+        struct HighBetaInst { uint32_t token; const char* symbol; };
+        static constexpr HighBetaInst kHighBetaUniverse[] = {
+            {884737,  "TATAMOTORS"},
+            {98049,   "BEL"},
+            {502785,  "TRENT"},
+            {3771393, "DLF"},
+            {348929,  "HINDALCO"},
+        };
+        for (const auto& hb : kHighBetaUniverse) {
+            whitelist.insert(hb.symbol);
+            books.try_emplace(hb.token, hb.token, std::string(hb.symbol));
+            tick_sizes_paise.try_emplace(hb.token, 5);
+            symbol_to_token.try_emplace(hb.symbol, hb.token);
+        }
     }
 
     // 4. Crash Recovery via Atomic Write-Ahead State Journal
@@ -183,6 +197,9 @@ int main(int argc, char* argv[]) {
         primary_risk_cfg.enable_ofi_harvest = true;
     }
     risk::RiskManager active_risk_mgr(primary_risk_cfg);
+    if (initial_capital_override > 0.0) {
+        active_risk_mgr.set_starting_capital_override(initial_capital_override);
+    }
     if (recovered_pos.has_value()) {
         active_risk_mgr.set_has_active_position(true);
     }
@@ -202,13 +219,16 @@ int main(int argc, char* argv[]) {
 
     // 5b. Initialize Parallel Track B (L2 Microstructure Harvester) when running in Dual-Mode ("both")
     core::RiskConfig harv_cfg = risk_cfg;
-    harv_cfg.max_position_value_inr = 5000.0;
+    harv_cfg.max_position_value_inr = 9800.0;
     harv_cfg.breakeven_trigger_pct = 1.0;
     harv_cfg.afternoon_end_sec = 14 * 3600 + 45 * 60;
     harv_cfg.enable_ofi_harvest = true;
 
-    risk::RiskManager harv_risk_mgr(harv_cfg);
     const double harv_initial_cap = (harv_capital_override > 0.0) ? harv_capital_override : risk_cfg.initial_capital_inr;
+    risk::RiskManager harv_risk_mgr(harv_cfg);
+    if (harv_capital_override > 0.0) {
+        harv_risk_mgr.set_starting_capital_override(harv_capital_override);
+    }
     execution::PaperBroker harv_broker(harv_initial_cap);
     execution::TradeAuditor harv_auditor(harv_initial_cap);
     strategy::MomentumBreakoutStrategy harv_strat(
@@ -247,8 +267,8 @@ int main(int argc, char* argv[]) {
             harv_position.is_breakeven_set = false;
             harv_position.open_time_ns = order.updated_time_ns;
             harv_risk_mgr.set_has_active_position(true);
-            if (live_tail) {
-                std::cout << "[LIVE_EVENT] {\"type\":\"FILL\",\"track\":\"HARVESTER\",\"side\":\"BUY\",\"symbol\":\""
+            if (live_tail || emit_events) {
+                std::cout << "[LIVE_EVENT] {\"type\":\"FILL\",\"track\":\"HARVESTER\",\"ts_ns\":" << order.updated_time_ns << ",\"side\":\"BUY\",\"symbol\":\""
                           << order.symbol << "\",\"qty\":" << order.filled_quantity
                           << ",\"price\":" << std::fixed << std::setprecision(2) << core::to_inr(order.avg_fill_price)
                           << ",\"sl\":" << core::to_inr(harv_position.current_stop_loss)
@@ -260,10 +280,10 @@ int main(int argc, char* argv[]) {
             harv_pending_signal = core::TradingSignal{};
             harv_risk_mgr.on_trade_closed(audit);
             harv_strat.on_trade_fill(audit);
-            if (live_tail) {
+            if (live_tail || emit_events) {
                 const double total_taxes = audit.stt_inr + audit.exchange_fee_inr + audit.gst_inr +
                                            audit.stamp_duty_inr + audit.sebi_turnover_inr;
-                std::cout << "[LIVE_EVENT] {\"type\":\"FILL\",\"track\":\"HARVESTER\",\"side\":\"SELL\",\"symbol\":\""
+                std::cout << "[LIVE_EVENT] {\"type\":\"FILL\",\"track\":\"HARVESTER\",\"ts_ns\":" << audit.exit_time_ns << ",\"side\":\"SELL\",\"symbol\":\""
                           << order.symbol << "\",\"qty\":" << audit.quantity
                           << ",\"price\":" << std::fixed << std::setprecision(2) << core::to_inr(audit.exit_price)
                           << ",\"gross_pnl\":" << audit.gross_pnl_inr
@@ -309,12 +329,16 @@ int main(int argc, char* argv[]) {
     omni_cfg.afternoon_end_sec = 14 * 3600 + 45 * 60;
     omni_cfg.breakeven_trigger_pct = 0.90;
     omni_cfg.enable_ofi_harvest = false;
+    omni_cfg.max_risk_per_trade_inr = 180.0;   // Moskowitz et al. (2012) 1.80% volatility/risk target
+    omni_cfg.max_position_value_inr = 21500.0; // Controlled 2.15x Intraday MIS Notional Cap (57% free SEBI margin buffer)
 
+    const double omni_initial_cap = (omni_capital_override > 0.0) ? omni_capital_override : risk_cfg.initial_capital_inr;
     risk::RiskManager omni_risk_mgr(omni_cfg);
+    omni_risk_mgr.set_starting_capital_override(omni_initial_cap);
     core::RiskConfig omni_short_cfg = omni_cfg;
     omni_short_cfg.breakeven_trigger_pct = 0.45;
     risk::RiskManager omni_short_risk_mgr(omni_short_cfg);
-    const double omni_initial_cap = (omni_capital_override > 0.0) ? omni_capital_override : risk_cfg.initial_capital_inr;
+    omni_short_risk_mgr.set_starting_capital_override(omni_initial_cap);
     double omni_shared_balance = omni_initial_cap;
     std::vector<core::TradeAuditEntry> omni_combined_trades;
     execution::PaperBroker omni_broker(omni_initial_cap);
@@ -376,6 +400,8 @@ int main(int argc, char* argv[]) {
             omni_risk_mgr.on_trade_closed(audit);
             omni_strat.on_trade_fill(audit);
             omni_shared_balance += audit.net_pnl_inr;
+            omni_risk_mgr.sync_shared_capital(omni_shared_balance);
+            omni_short_risk_mgr.sync_shared_capital(omni_shared_balance);
             omni_combined_trades.push_back(audit);
             if (live_tail || emit_events) {
                 const double total_taxes = audit.stt_inr + audit.exchange_fee_inr + audit.gst_inr +
@@ -437,6 +463,8 @@ int main(int argc, char* argv[]) {
             omni_short_risk_mgr.on_trade_closed(audit);
             omni_strat.on_trade_fill(audit);
             omni_shared_balance += audit.net_pnl_inr;
+            omni_risk_mgr.sync_shared_capital(omni_shared_balance);
+            omni_short_risk_mgr.sync_shared_capital(omni_shared_balance);
             omni_combined_trades.push_back(audit);
             if (live_tail || emit_events) {
                 const double total_taxes = audit.stt_inr + audit.exchange_fee_inr + audit.gst_inr +

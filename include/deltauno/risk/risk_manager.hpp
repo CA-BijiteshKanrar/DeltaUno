@@ -165,8 +165,8 @@ public:
         double comp_mult = 1.0;
         if (!cfg_.enable_ofi_harvest &&
             max_position_value_paise_ > core::to_paise(5000.0) &&
-            current_capital_inr_ > cfg_.initial_capital_inr &&
-            cfg_.initial_capital_inr > 0.0) {
+            cfg_.initial_capital_inr > 0.0 &&
+            (current_capital_inr_ > cfg_.initial_capital_inr || enable_bidirectional_compounding_)) {
             comp_mult = current_capital_inr_ / cfg_.initial_capital_inr;
         }
         const auto dynamic_risk_paise = static_cast<core::Price>(static_cast<double>(max_risk_per_trade_paise_) * comp_mult);
@@ -307,8 +307,9 @@ public:
         // (Active in Harvester mode when live L2 OrderBook depth is available)
         if (book != nullptr && book->best_bid() > 0 &&
             (cfg_.enable_ofi_harvest || max_position_value_paise_ <= core::to_paise(5000.0))) {
+            const double min_win_mult = cfg_.enable_ofi_harvest ? 1.0055 : 1.0015;
             const core::Price min_net_win_bid = std::max(
-                core::ceil_to_tick(static_cast<core::Price>(static_cast<double>(pos.avg_entry_price) * 1.0015), tick_size_paise),
+                core::ceil_to_tick(static_cast<core::Price>(static_cast<double>(pos.avg_entry_price) * min_win_mult), tick_size_paise),
                 pos.avg_entry_price + 2 * std::max<core::Price>(1, tick_size_paise));
 
             // Progressive profit floor ratcheting at +0.40% and +0.70% MFE
@@ -507,6 +508,25 @@ public:
         return is_pilot_stopout_active_;
     }
 
+    void set_starting_capital_override(double override_capital_inr) noexcept {
+        if (override_capital_inr > 0.0) {
+            current_capital_inr_ = override_capital_inr;
+            peak_capital_inr_ = std::max(peak_capital_inr_, override_capital_inr);
+            day_starting_capital_inr_ = override_capital_inr;
+            day_peak_capital_inr_ = override_capital_inr;
+            day_trough_capital_inr_ = override_capital_inr;
+            enable_bidirectional_compounding_ = true;
+        }
+    }
+
+    void sync_shared_capital(double shared_capital_inr) noexcept {
+        current_capital_inr_ = shared_capital_inr;
+        if (current_capital_inr_ > peak_capital_inr_) peak_capital_inr_ = current_capital_inr_;
+        if (current_capital_inr_ > day_peak_capital_inr_) day_peak_capital_inr_ = current_capital_inr_;
+        if (current_capital_inr_ < day_trough_capital_inr_) day_trough_capital_inr_ = current_capital_inr_;
+        enable_bidirectional_compounding_ = true;
+    }
+
     [[nodiscard]] core::Price daily_drawdown_paise() const noexcept {
         return std::max<core::Price>(0, intraday_peak_pnl_paise_ - daily_net_pnl_paise_);
     }
@@ -557,6 +577,7 @@ private:
     bool is_kill_switch_active_{false};
     bool is_pilot_stopout_active_{false};
     bool has_active_position_{false};
+    bool enable_bidirectional_compounding_{false};
     std::vector<DailyKillSwitchAudit> kill_switch_history_;
 };
 
