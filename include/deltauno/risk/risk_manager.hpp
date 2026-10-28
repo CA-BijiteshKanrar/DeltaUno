@@ -146,13 +146,22 @@ public:
             return {0, RiskRejection::OUTSIDE_TRADING_WINDOW};
         }
 
-        // 6. Dynamic Fixed-Risk Sizing Formula:
-        // Quantity = min( floor(Max_Risk / (Entry - SL)), floor(Max_Position_Value / Entry) )
-        if (signal.target_entry <= 0 || signal.target_entry <= signal.stop_loss) {
+        // 6. Dynamic Fixed-Risk Sizing Formula (Bi-Directional: BUY Long & SELL Short):
+        // Quantity = min( floor(Max_Risk / |Entry - SL|), floor(Max_Position_Value / Entry) )
+        const bool is_short = (signal.side == core::Side::SELL);
+        if (signal.target_entry <= 0) {
+            return {0, RiskRejection::INSUFFICIENT_PAYOFF_TO_FEE_RATIO};
+        }
+        if (!is_short && (signal.target_entry <= signal.stop_loss || signal.take_profit <= signal.target_entry)) {
+            return {0, RiskRejection::INSUFFICIENT_PAYOFF_TO_FEE_RATIO};
+        }
+        if (is_short && (signal.stop_loss <= signal.target_entry || signal.target_entry <= signal.take_profit)) {
             return {0, RiskRejection::INSUFFICIENT_PAYOFF_TO_FEE_RATIO};
         }
 
-        const core::Price risk_per_share_paise = signal.target_entry - signal.stop_loss;
+        const core::Price risk_per_share_paise = is_short
+            ? (signal.stop_loss - signal.target_entry)
+            : (signal.target_entry - signal.stop_loss);
         double comp_mult = 1.0;
         if (!cfg_.enable_ofi_harvest &&
             max_position_value_paise_ > core::to_paise(5000.0) &&
@@ -180,8 +189,11 @@ public:
         const double est_stamp = trade_value_inr * 0.00003;          // 0.003% on buy
         const double total_est_fees_inr = est_stt + est_turnover + est_gst + est_stamp + est_sebi;
 
+        const core::Price reward_per_share_paise = is_short
+            ? (signal.target_entry - signal.take_profit)
+            : (signal.take_profit - signal.target_entry);
         const double expected_gain_inr =
-            core::to_inr((signal.take_profit - signal.target_entry) * static_cast<core::Price>(final_qty));
+            core::to_inr(reward_per_share_paise * static_cast<core::Price>(final_qty));
         if (expected_gain_inr < total_est_fees_inr * cfg_.min_payoff_to_fee_ratio) {
             return {0, RiskRejection::INSUFFICIENT_PAYOFF_TO_FEE_RATIO};
         }
@@ -205,17 +217,77 @@ public:
         if (pos.worst_adverse_price == 0) {
             pos.worst_adverse_price = pos.avg_entry_price;
         }
-        if (current_market_price > pos.peak_favorable_price) {
-            pos.peak_favorable_price = current_market_price;
-        }
-        if (current_market_price < pos.worst_adverse_price) {
-            pos.worst_adverse_price = current_market_price;
+
+        const bool is_short = (pos.side == core::Side::SELL) && (pos.take_profit == 0 || pos.take_profit < pos.avg_entry_price);
+        if (!is_short) {
+            if (current_market_price > pos.peak_favorable_price) {
+                pos.peak_favorable_price = current_market_price;
+            }
+            if (current_market_price < pos.worst_adverse_price) {
+                pos.worst_adverse_price = current_market_price;
+            }
+        } else {
+            if (current_market_price < pos.peak_favorable_price) {
+                pos.peak_favorable_price = current_market_price;
+            }
+            if (current_market_price > pos.worst_adverse_price) {
+                pos.worst_adverse_price = current_market_price;
+            }
         }
 
         // 1. Auto-Squareoff Shield at 15:05 IST
         const int seconds_from_midnight_ist = get_seconds_from_midnight_ist(current_time_ns);
         if (seconds_from_midnight_ist >= cfg_.auto_squareoff_sec) {
             return {true, "AUTO_SQUAREOFF_SHIELD_1505"};
+        }
+
+        if (is_short) {
+            // Symmetric Short Position Management (Downward Break-Even Ratchet & SL/TP)
+            const double trigger_mult = 1.0 - (cfg_.breakeven_trigger_pct / 100.0);
+            const auto trigger_price = static_cast<core::Price>(static_cast<double>(pos.avg_entry_price) * trigger_mult);
+            if (!pos.is_breakeven_set && current_market_price <= trigger_price) {
+                const auto raw_be = static_cast<core::Price>(static_cast<double>(pos.avg_entry_price) * 0.9985);
+                const core::Price breakeven_price = std::min(
+                    core::floor_to_tick(raw_be, tick_size_paise),
+                    pos.avg_entry_price - std::max<core::Price>(1, tick_size_paise));
+                pos.current_stop_loss = std::min(pos.current_stop_loss, breakeven_price);
+                pos.is_breakeven_set = true;
+            }
+
+            if (book != nullptr && book->best_ask() > 0 && cfg_.enable_ofi_harvest) {
+                const core::Price max_net_win_ask = std::min(
+                    core::floor_to_tick(static_cast<core::Price>(static_cast<double>(pos.avg_entry_price) * 0.9985), tick_size_paise),
+                    pos.avg_entry_price - 2 * std::max<core::Price>(1, tick_size_paise));
+                const auto stage1_trigger = static_cast<core::Price>(static_cast<double>(pos.avg_entry_price) * 0.9960);
+                const auto stage2_trigger = static_cast<core::Price>(static_cast<double>(pos.avg_entry_price) * 0.9930);
+                if (current_market_price <= stage2_trigger) {
+                    const core::Price stage2_lock = std::min(
+                        max_net_win_ask,
+                        core::floor_to_tick(static_cast<core::Price>(static_cast<double>(pos.avg_entry_price) * 0.9965), tick_size_paise));
+                    pos.current_stop_loss = std::min(pos.current_stop_loss, stage2_lock);
+                } else if (current_market_price <= stage1_trigger) {
+                    pos.current_stop_loss = std::min(pos.current_stop_loss, max_net_win_ask);
+                }
+                const bool is_bouncing_or_stalled =
+                    (current_market_price > pos.peak_favorable_price) ||
+                    (pos.open_time_ns > 0 && current_time_ns > pos.open_time_ns &&
+                     (current_time_ns - pos.open_time_ns) >= 900'000'000'000ULL);
+                if (is_bouncing_or_stalled && book->best_ask() <= max_net_win_ask) {
+                    if (book->composite_ofi() > -0.35 || book->weighted_mid_price() > book->mid_price()) {
+                        return {true, "OFI_EXHAUSTION_PROFIT_HARVEST"};
+                    }
+                }
+            }
+
+            if (current_market_price >= pos.current_stop_loss) {
+                return {true, (pos.is_breakeven_set || pos.current_stop_loss < pos.avg_entry_price)
+                                  ? "BREAKEVEN_STOP_TRIGGERED"
+                                  : "STOP_LOSS_TRIGGERED"};
+            }
+            if (pos.take_profit > 0 && current_market_price <= pos.take_profit) {
+                return {true, "TAKE_PROFIT_TRIGGERED"};
+            }
+            return {false, "HOLD"};
         }
 
         // 2. Zero-Loss Break-Even Trailing Stop

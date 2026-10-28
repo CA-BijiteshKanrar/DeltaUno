@@ -25,11 +25,8 @@ public:
         if (has_same_side_pending) {
             return false;
         }
-        if (order.side == core::Side::BUY && has_long_) {
-            return false;
-        }
-        if (order.side == core::Side::SELL && !has_long_) {
-            return false;
+        if (has_long_ && order.side == active_long_.side) {
+            return false; // Already holding same-side position; only opposite closing leg allowed
         }
 
         // Enforce Zero Look-Ahead Bias: order enters pending queue to fill strictly on Tick[t+1]
@@ -77,7 +74,11 @@ public:
     void on_next_tick(const core::MarketTick& tick, const market::OrderBook& book) {
         if (has_long_ && tick.token == active_long_.token) {
             update_excursion(tick.last_price);
-            update_excursion(book.best_bid());
+            if (active_long_.side == core::Side::BUY) {
+                update_excursion(book.best_bid());
+            } else {
+                update_excursion(book.best_ask());
+            }
         }
 
         if (pending_orders_.empty()) return;
@@ -101,6 +102,14 @@ public:
     }
 
     [[nodiscard]] bool has_open_long() const noexcept {
+        return has_long_ && active_long_.side == core::Side::BUY;
+    }
+
+    [[nodiscard]] bool has_open_short() const noexcept {
+        return has_long_ && active_long_.side == core::Side::SELL;
+    }
+
+    [[nodiscard]] bool has_open_position() const noexcept {
         return has_long_;
     }
 
@@ -172,7 +181,7 @@ private:
     }
 
     void process_fill(const core::Order& order, uint64_t fill_time_ns) {
-        if (order.side == core::Side::BUY) {
+        if (!has_long_) {
             active_long_ = order;
             has_long_ = true;
             peak_favorable_price_ = order.avg_fill_price;
@@ -182,24 +191,32 @@ private:
             if (fill_callback_) {
                 fill_callback_(order, empty_audit);
             }
-        } else if (order.side == core::Side::SELL && has_long_) {
+        } else if (has_long_ && order.side != active_long_.side) {
             update_excursion(order.avg_fill_price);
 
+            const bool was_short = (active_long_.side == core::Side::SELL);
             core::TradeAuditEntry audit{};
             audit.trade_id = ++next_trade_id_;
             core::copy_fixed_str(audit.symbol, order.symbol);
-            audit.side = core::Side::BUY;
+            audit.side = active_long_.side;
             audit.entry_price = active_long_.avg_fill_price;
             audit.exit_price = order.avg_fill_price;
             audit.quantity = order.quantity;
             audit.entry_time_ns = active_long_.updated_time_ns;
             audit.exit_time_ns = fill_time_ns;
 
-            audit.max_adverse_excursion = std::max<core::Price>(0, audit.entry_price - worst_adverse_price_);
-            audit.max_favorable_excursion = std::max<core::Price>(0, peak_favorable_price_ - audit.entry_price);
+            if (!was_short) {
+                audit.max_adverse_excursion = std::max<core::Price>(0, audit.entry_price - worst_adverse_price_);
+                audit.max_favorable_excursion = std::max<core::Price>(0, peak_favorable_price_ - audit.entry_price);
+            } else {
+                audit.max_adverse_excursion = std::max<core::Price>(0, peak_favorable_price_ - audit.entry_price);
+                audit.max_favorable_excursion = std::max<core::Price>(0, audit.entry_price - worst_adverse_price_);
+            }
 
-            const double buy_val = core::to_inr(audit.entry_price * static_cast<core::Price>(audit.quantity));
-            const double sell_val = core::to_inr(audit.exit_price * static_cast<core::Price>(audit.quantity));
+            const double entry_val = core::to_inr(audit.entry_price * static_cast<core::Price>(audit.quantity));
+            const double exit_val = core::to_inr(audit.exit_price * static_cast<core::Price>(audit.quantity));
+            const double buy_val = was_short ? exit_val : entry_val;
+            const double sell_val = was_short ? entry_val : exit_val;
             const double turnover = buy_val + sell_val;
 
             audit.gross_pnl_inr = sell_val - buy_val;

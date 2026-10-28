@@ -92,9 +92,73 @@ void test_paper_matching_excursions_and_statutory_taxes() {
     std::cout << "[PASS] test_paper_matching_excursions_and_statutory_taxes\n";
 }
 
+void test_short_selling_round_trip() {
+    execution::PaperBroker broker(10000.0);
+
+    market::OrderBook book(349121, "TATASTEEL");
+    core::MarketTick tick1{};
+    tick1.token = 349121;
+    tick1.timestamp_ns = 1000000;
+    tick1.last_price = core::to_paise(150.00);
+    tick1.bids[0] = {core::to_paise(149.95), 1000, 5};
+    tick1.asks[0] = {core::to_paise(150.05), 1000, 5};
+    book.on_tick(tick1);
+
+    // Place SHORT entry (Side::SELL when flat)
+    core::Order short_order{};
+    short_order.client_order_id = 10;
+    short_order.token = 349121;
+    core::copy_fixed_str(short_order.symbol, "TATASTEEL");
+    short_order.side = core::Side::SELL;
+    short_order.quantity = 4;
+    short_order.created_time_ns = 1000000;
+
+    DU_EXPECT(broker.place_order(short_order));
+    DU_EXPECT(!broker.place_order(short_order));
+
+    // Tick 2 fills SHORT entry
+    core::MarketTick tick2 = tick1;
+    tick2.timestamp_ns = 2000000;
+    book.on_tick(tick2);
+    broker.on_next_tick(tick2, book);
+    DU_EXPECT(broker.has_open_short());
+    DU_EXPECT(broker.has_open_position());
+
+    // Tick 3 drops to 147.50 (favorable for short -> cover order placed)
+    core::MarketTick tick3 = tick1;
+    tick3.timestamp_ns = 3000000;
+    tick3.last_price = core::to_paise(147.50);
+    tick3.bids[0] = {core::to_paise(147.45), 1000, 5};
+    tick3.asks[0] = {core::to_paise(147.50), 1000, 5};
+    book.on_tick(tick3);
+    broker.on_next_tick(tick3, book);
+
+    core::Order cover_order = short_order;
+    cover_order.client_order_id = 11;
+    cover_order.side = core::Side::BUY;
+    cover_order.created_time_ns = 3000000;
+    DU_EXPECT(broker.place_order(cover_order));
+
+    core::MarketTick tick4 = tick3;
+    tick4.timestamp_ns = 4000000;
+    book.on_tick(tick4);
+    broker.on_next_tick(tick4, book);
+
+    DU_EXPECT(!broker.has_open_position());
+    DU_EXPECT(broker.total_trades_count() == 1);
+    const auto& trade = broker.trade_history()[0];
+    DU_EXPECT(trade.side == core::Side::SELL);
+    DU_EXPECT(trade.gross_pnl_inr > 0.0);
+    DU_EXPECT(trade.net_pnl_inr > 0.0);
+    DU_EXPECT_NEAR(broker.cash_balance_inr(), 10000.0 + trade.net_pnl_inr, 1e-9);
+
+    std::cout << "[PASS] test_short_selling_round_trip\n";
+}
+
 int main() {
     std::cout << "Running PaperBroker tests...\n";
     test_paper_matching_excursions_and_statutory_taxes();
+    test_short_selling_round_trip();
     std::cout << "All PaperBroker tests passed!\n";
     return 0;
 }

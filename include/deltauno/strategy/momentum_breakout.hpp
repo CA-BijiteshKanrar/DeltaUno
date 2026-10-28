@@ -23,6 +23,7 @@ struct SymbolIndicatorState {
     uint64_t cumulative_volume{0};
     core::Price prev_last_price{0};
     uint32_t consecutive_bullish_ticks{0};
+    uint32_t consecutive_bearish_ticks{0};
     uint64_t last_exit_time_ns{0};
     uint32_t consecutive_losses{0};
 
@@ -33,6 +34,7 @@ struct SymbolIndicatorState {
         cumulative_volume = 0;
         prev_last_price = 0;
         consecutive_bullish_ticks = 0;
+        consecutive_bearish_ticks = 0;
         last_exit_time_ns = 0;
         consecutive_losses = 0;
     }
@@ -55,8 +57,9 @@ struct SymbolIndicatorState {
 };
 
 enum class StrategyMode : uint8_t {
-    COMPOUNDER = 0, // High-Yield Equity Compounder (+22.13% / 84.0% WR: Top-5 Depth + Asymmetric TP)
-    HARVESTER  = 1  // L2 Microstructure Order-Flow Harvester (+6.08% / 78.7% WR: Stoikov Microprice + Cooldown)
+    COMPOUNDER = 0, // Track A: Long-Only High-Yield Equity Compounder (Control)
+    HARVESTER  = 1, // Track B: Long-Only L2 Microstructure Order-Flow Harvester (Control)
+    OMNI       = 2  // Track C: Bi-Directional (Long + Short) + Continuous 09:35-14:45 Window + Midday Tier
 };
 
 class MomentumBreakoutStrategy : public IStrategy {
@@ -131,19 +134,27 @@ public:
         if (state.prev_last_price > 0) {
             if (tick.last_price >= state.prev_last_price && ofi > 0.15) {
                 ++state.consecutive_bullish_ticks;
+                state.consecutive_bearish_ticks = 0;
+            } else if (tick.last_price <= state.prev_last_price && ofi < -0.15) {
+                ++state.consecutive_bearish_ticks;
+                state.consecutive_bullish_ticks = 0;
             } else if (tick.last_price < state.prev_last_price && ofi < 0.0) {
                 state.consecutive_bullish_ticks = 0;
+            } else if (tick.last_price > state.prev_last_price && ofi > 0.0) {
+                state.consecutive_bearish_ticks = 0;
             }
         } else if (ofi > 0.15) {
             state.consecutive_bullish_ticks = 1;
+        } else if (ofi < -0.15) {
+            state.consecutive_bearish_ticks = 1;
         }
         state.prev_last_price = tick.last_price;
         last_active_token_ = tick.token;
     }
 
     [[nodiscard]] std::optional<core::TradingSignal> generate_signal(const market::OrderBook& book) override {
-        // 0. Macro Market Regime Gate: Veto new long breakouts if NIFTY is in heavy sell-off
-        if (is_macro_bearish_) {
+        // 0. Macro Market Regime Gate: For Long-Only modes (Track A & B), veto if NIFTY is in heavy sell-off
+        if (mode_ != StrategyMode::OMNI && is_macro_bearish_) {
             return std::nullopt;
         }
 
@@ -222,6 +233,79 @@ public:
                 sig.source = core::SignalSource::INTERNAL_MOMENTUM;
                 sig.is_valid = true;
                 return sig;
+            }
+            return std::nullopt;
+        }
+
+        if (mode_ == StrategyMode::OMNI) {
+            // Track C (Bi-Directional Omni): Continuous 09:35-14:45 Window + High-Conviction Midday Tier + Long/Short
+            if (state.last_exit_time_ns > 0 && book.last_tick_time_ns() > state.last_exit_time_ns) {
+                const uint64_t elapsed_ns = book.last_tick_time_ns() - state.last_exit_time_ns;
+                if (state.consecutive_losses >= 1 || elapsed_ns < 2700'000'000'000ULL) {
+                    return std::nullopt; // 45-minute post-exit cooldown per symbol & stop re-entering a loser
+                }
+            }
+
+            const uint64_t sec_ist = ((book.last_tick_time_ns() / 1'000'000'000ULL) + 19800ULL) % 86400ULL;
+            const bool is_midday_window = (sec_ist >= (11 * 3600 + 15 * 60) && sec_ist <= (13 * 3600 + 15 * 60));
+            const double req_vol_mult = is_midday_window ? std::max(3.2, volume_surge_multiple_ * 1.25) : volume_surge_multiple_;
+            const double req_ofi = is_midday_window ? std::max(0.70, min_composite_ofi_ + 0.15) : min_composite_ofi_;
+            const double req_depth = is_midday_window ? std::max(1.40, min_bid_depth_ratio_ + 0.15) : min_bid_depth_ratio_;
+
+            if (vol_mult < req_vol_mult) {
+                return std::nullopt;
+            }
+
+            const bool has_established_vwap = (state.cumulative_volume >= 10000 && vwap > 0);
+
+            // Path 1: LONG Breakout (Allowed when NIFTY is not in bearish sell-off)
+            if (!is_macro_bearish_ && ofi >= req_ofi && book.best_ask() > 0) {
+                const bool above_vwap = !has_established_vwap || (book.best_bid() >= vwap);
+                const bool bid_depth_ok = (book.top5_bid_to_ask_depth_ratio() >= req_depth);
+                const bool micro_ok = (book.weighted_mid_price() >= book.mid_price());
+                if (above_vwap && bid_depth_ok && micro_ok) {
+                    core::TradingSignal sig{};
+                    sig.timestamp_ns = book.last_tick_time_ns();
+                    sig.token = token;
+                    core::copy_fixed_str(sig.symbol, book.symbol());
+                    sig.side = core::Side::BUY;
+                    sig.target_entry = book.best_ask();
+                    const auto raw_sl = static_cast<core::Price>(
+                        static_cast<double>(sig.target_entry) * (1.0 - stop_loss_pct_ / 100.0));
+                    const auto raw_tp = static_cast<core::Price>(
+                        static_cast<double>(sig.target_entry) * (1.0 + take_profit_pct_ / 100.0));
+                    sig.stop_loss = core::floor_to_tick(raw_sl, tick_size_paise_);
+                    sig.take_profit = core::ceil_to_tick(raw_tp, tick_size_paise_);
+                    sig.confidence = std::clamp(ofi, 0.0, 1.0);
+                    sig.source = core::SignalSource::INTERNAL_MOMENTUM;
+                    sig.is_valid = true;
+                    return sig;
+                }
+            }
+
+            // Path 2: SHORT Breakdown (Allowed when NIFTY is bearish OR stock shows severe L2 distribution below VWAP)
+            const double short_req_ofi = is_macro_bearish_ ? req_ofi : std::max(0.65, req_ofi);
+            if (has_established_vwap && ofi <= -short_req_ofi && book.best_bid() > 0 && book.best_ask() <= vwap) {
+                const bool ask_depth_ok = (book.top5_ask_to_bid_depth_ratio() >= req_depth);
+                const bool micro_bearish = (book.weighted_mid_price() <= book.mid_price());
+                if (ask_depth_ok && micro_bearish && state.consecutive_bearish_ticks >= 1) {
+                    core::TradingSignal sig{};
+                    sig.timestamp_ns = book.last_tick_time_ns();
+                    sig.token = token;
+                    core::copy_fixed_str(sig.symbol, book.symbol());
+                    sig.side = core::Side::SELL;
+                    sig.target_entry = book.best_bid();
+                    const auto raw_sl = static_cast<core::Price>(
+                        static_cast<double>(sig.target_entry) * (1.0 + stop_loss_pct_ / 100.0));
+                    const auto raw_tp = static_cast<core::Price>(
+                        static_cast<double>(sig.target_entry) * (1.0 - take_profit_pct_ / 100.0));
+                    sig.stop_loss = core::ceil_to_tick(raw_sl, tick_size_paise_);
+                    sig.take_profit = core::floor_to_tick(raw_tp, tick_size_paise_);
+                    sig.confidence = std::clamp(-ofi, 0.0, 1.0);
+                    sig.source = core::SignalSource::INTERNAL_MOMENTUM;
+                    sig.is_valid = true;
+                    return sig;
+                }
             }
             return std::nullopt;
         }

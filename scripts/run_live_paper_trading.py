@@ -684,10 +684,10 @@ class GoogleSheetsLiveSync:
             return False
 
     @staticmethod
-    def fetch_prior_closing_balances(sheet_id: str) -> Tuple[float, float]:
+    def fetch_prior_closing_balances(sheet_id: str) -> Tuple[float, float, float]:
         """Fetch prior session closing equity from Google Sheet Live_Trades tab for multi-day compounding."""
         if not sheet_id:
-            return (10000.0, 10000.0)
+            return (10000.0, 10000.0, 10000.0)
         try:
             import csv, io
             url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/gviz/tq?tqx=out:csv&sheet=Live_Trades"
@@ -698,27 +698,31 @@ class GoogleSheetsLiveSync:
             rows = list(reader)
             last_comp = 10000.0
             last_harv = 10000.0
+            last_omni = 10000.0
             for r in rows[1:]:
                 if len(r) >= 13:
                     trk = r[2].strip().upper()
                     side = r[3].strip().upper()
                     bal_str = r[12].strip()
-                    if side == "SELL" and bal_str:
+                    if side in ("SELL", "COVER") and bal_str:
                         try:
                             val = float(bal_str)
                             if trk == "COMPOUNDER":
                                 last_comp = val
                             elif trk == "HARVESTER":
                                 last_harv = val
+                            elif trk == "OMNI":
+                                last_omni = val
                         except ValueError:
                             pass
-            return (round(last_comp, 2), round(last_harv, 2))
+            return (round(last_comp, 2), round(last_harv, 2), round(last_omni, 2))
         except Exception as e:
             print(f"[INFO] Could not fetch prior closing balance ({e}); defaulting to 10000.0 INR baseline.", flush=True)
-            return (10000.0, 10000.0)
+            return (10000.0, 10000.0, 10000.0)
 
     def __init__(self, webhook_url: str, provider_name: str, mode: str,
-                 initial_comp_equity: float = 10000.0, initial_harv_equity: float = 10000.0):
+                 initial_comp_equity: float = 10000.0, initial_harv_equity: float = 10000.0,
+                 initial_omni_equity: float = 10000.0):
         self.webhook_url = webhook_url.strip()
         self.provider_name = provider_name.upper()
         self.mode = mode.upper()
@@ -728,6 +732,7 @@ class GoogleSheetsLiveSync:
         self.latest_quotes: List[Dict[str, Any]] = []
         self.initial_comp_equity = float(initial_comp_equity)
         self.initial_harv_equity = float(initial_harv_equity)
+        self.initial_omni_equity = float(initial_omni_equity)
 
         self.nifty_ltp: float = 0.0
         self.nifty_ret_pct: float = 0.0
@@ -736,6 +741,7 @@ class GoogleSheetsLiveSync:
         self.tracks: Dict[str, Dict[str, Any]] = {
             "COMPOUNDER": {"equity": float(initial_comp_equity), "pnl": float(initial_comp_equity - 10000.0), "trades": 0, "wins": 0, "open_pos": "FLAT"},
             "HARVESTER": {"equity": float(initial_harv_equity), "pnl": float(initial_harv_equity - 10000.0), "trades": 0, "wins": 0, "open_pos": "FLAT"},
+            "OMNI": {"equity": float(initial_omni_equity), "pnl": float(initial_omni_equity - 10000.0), "trades": 0, "wins": 0, "open_pos": "FLAT"},
         }
 
     @property
@@ -776,6 +782,7 @@ class GoogleSheetsLiveSync:
         now_str = datetime.now(TZ_IST).strftime("%Y-%m-%d %H:%M:%S IST")
         c = self.tracks["COMPOUNDER"]
         h = self.tracks["HARVESTER"]
+        o = self.tracks["OMNI"]
         return {
             "timestamp_ist": now_str,
             "source": self.source,
@@ -795,6 +802,11 @@ class GoogleSheetsLiveSync:
             "harv_ret_pct": f"{(h['pnl'] / 10000.0) * 100.0:+.2f}%",
             "harv_trades": f"{h['wins']}W / {h['trades']}T",
             "harv_open_pos": h["open_pos"],
+            "omni_equity": round(o["equity"], 2),
+            "omni_pnl": round(o["pnl"], 2),
+            "omni_ret_pct": f"{(o['pnl'] / 10000.0) * 100.0:+.2f}%",
+            "omni_trades": f"{o['wins']}W / {o['trades']}T",
+            "omni_open_pos": o["open_pos"],
             "quotes": list(self.latest_quotes),
         }
 
@@ -828,11 +840,12 @@ class GoogleSheetsLiveSync:
 
         with self.lock:
             trk = self.tracks.get(trk_name, self.tracks["COMPOUNDER"])
-            if side == "BUY":
+            if side in ("BUY", "SHORT"):
                 sl = ev.get("sl", 0.0)
                 tp = ev.get("tp", 0.0)
-                trk["open_pos"] = f"LONG {sym} x{qty} @ {price:.2f} (SL {sl:.2f} / TP {tp:.2f})"
-            elif side == "SELL":
+                dir_lbl = "SHORT" if side == "SHORT" else "LONG"
+                trk["open_pos"] = f"{dir_lbl} {sym} x{qty} @ {price:.2f} (SL {sl:.2f} / TP {tp:.2f})"
+            elif side in ("SELL", "COVER"):
                 net_pnl = float(ev.get("net_pnl", 0.0))
                 trk["pnl"] += net_pnl
                 trk["equity"] = float(ev.get("balance", 10000.0 + trk["pnl"]))
@@ -878,12 +891,16 @@ class GoogleSheetsLiveSync:
         with self.lock:
             c = self.tracks["COMPOUNDER"]
             h = self.tracks["HARVESTER"]
+            o = self.tracks["OMNI"]
             c_wr = (c["wins"] / c["trades"] * 100.0) if c["trades"] > 0 else 0.0
             h_wr = (h["wins"] / h["trades"] * 100.0) if h["trades"] > 0 else 0.0
+            o_wr = (o["wins"] / o["trades"] * 100.0) if o["trades"] > 0 else 0.0
             comp_day_pnl = round(c["equity"] - self.initial_comp_equity, 2)
             harv_day_pnl = round(h["equity"] - self.initial_harv_equity, 2)
+            omni_day_pnl = round(o["equity"] - self.initial_omni_equity, 2)
             comp_day_ret = round((comp_day_pnl / self.initial_comp_equity) * 100.0, 2) if self.initial_comp_equity > 0 else 0.0
             harv_day_ret = round((harv_day_pnl / self.initial_harv_equity) * 100.0, 2) if self.initial_harv_equity > 0 else 0.0
+            omni_day_ret = round((omni_day_pnl / self.initial_omni_equity) * 100.0, 2) if self.initial_omni_equity > 0 else 0.0
             dash = self._build_dashboard_dict("SESSION_COMPLETED")
             summary = {
                 "date_ist": datetime.now(TZ_IST).strftime("%Y-%m-%d"),
@@ -900,6 +917,11 @@ class GoogleSheetsLiveSync:
                 "harv_ret_pct": harv_day_ret,
                 "harv_trades": h["trades"],
                 "harv_win_rate": round(h_wr, 2),
+                "omni_equity": round(o["equity"], 2),
+                "omni_pnl": omni_day_pnl,
+                "omni_ret_pct": omni_day_ret,
+                "omni_trades": o["trades"],
+                "omni_win_rate": round(o_wr, 2),
             }
         return self._post_json({"event": "DAILY_SUMMARY", "dashboard": dash, "summary": summary})
 
@@ -998,8 +1020,8 @@ def main() -> int:
     provider = LiveQuoteProvider(args.provider)
     sheets_url = os.environ.get("GOOGLE_SHEETS_WEBHOOK_URL", "")
     sheet_id = os.environ.get("GOOGLE_SHEETS_ID", "133BVp-xnP4lZdbLlqDpagmhp10OLAHXzWaxhsYzHaJ4")
-    comp_init_cap, harv_init_cap = GoogleSheetsLiveSync.fetch_prior_closing_balances(sheet_id)
-    sheets_sync = GoogleSheetsLiveSync(sheets_url, provider.provider, args.mode, comp_init_cap, harv_init_cap)
+    comp_init_cap, harv_init_cap, omni_init_cap = GoogleSheetsLiveSync.fetch_prior_closing_balances(sheet_id)
+    sheets_sync = GoogleSheetsLiveSync(sheets_url, provider.provider, args.mode, comp_init_cap, harv_init_cap, omni_init_cap)
 
     now_ist = datetime.now(TZ_IST)
     today_iso = now_ist.strftime("%Y-%m-%d")
@@ -1051,6 +1073,7 @@ def main() -> int:
         "--csv", str(live_csv),
         "--capital", f"{comp_init_cap:.2f}",
         "--harv-capital", f"{harv_init_cap:.2f}",
+        "--omni-capital", f"{omni_init_cap:.2f}",
     ]
     proc = subprocess.Popen(
         cmd,

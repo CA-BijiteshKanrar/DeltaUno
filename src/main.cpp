@@ -55,8 +55,10 @@ int main(int argc, char* argv[]) {
     std::string run_mode = "both"; // "both" (default), "compounder", or "harvester"
     double initial_capital_override = 0.0;
     double harv_capital_override = 0.0;
+    double omni_capital_override = 0.0;
     bool realtime_pacing = false;
     bool live_tail = false;
+    bool emit_events = false;
     bool verbose_logs = false;
 
     for (int i = 1; i < argc; ++i) {
@@ -73,10 +75,15 @@ int main(int argc, char* argv[]) {
             initial_capital_override = std::stod(argv[++i]);
         } else if (arg == "--harv-capital" && i + 1 < argc) {
             harv_capital_override = std::stod(argv[++i]);
+        } else if (arg == "--omni-capital" && i + 1 < argc) {
+            omni_capital_override = std::stod(argv[++i]);
         } else if (arg == "--realtime") {
             realtime_pacing = true;
         } else if (arg == "--live-tail") {
             live_tail = true;
+            emit_events = true;
+        } else if (arg == "--emit-events") {
+            emit_events = true;
         } else if (arg == "--verbose") {
             verbose_logs = true;
         } else if (!arg.empty() && arg[0] != '-') {
@@ -90,9 +97,12 @@ int main(int argc, char* argv[]) {
         verbose_logs ? core::LogLevel::DEBUG : core::LogLevel::INFO);
 
     // 2. Load Runtime Configurations (Risk Limits, Liquid Whitelist, Macro Event Calendar)
-    core::RiskConfig risk_cfg = core::ConfigLoader::load_risk_config(config_dir + "/risk_limits.json");
-    if (initial_capital_override > 0.0) {
-        risk_cfg.initial_capital_inr = initial_capital_override;
+    core::RiskConfig risk_cfg = core::ConfigLoader::load_risk_config(config_dir + "/risk_limits.json");
+
+    if (initial_capital_override > 0.0) {
+
+        risk_cfg.initial_capital_inr = initial_capital_override;
+
     }
     LOG_INFO("=================================================");
     LOG_INFO("   DeltaUno Low-Latency C++20 Trading Engine     ");
@@ -288,6 +298,133 @@ int main(int argc, char* argv[]) {
             harv_lifecycle = PositionLifecycle::PENDING_ENTRY;
             harv_pending_signal = sig;
             harv_risk_mgr.set_has_active_position(true);
+        }
+    };
+
+    // 5c. Initialize Parallel Track C (Bi-Directional Omni: Long + Short + Continuous 09:35-14:45 Window)
+    core::RiskConfig omni_cfg = risk_cfg;
+    omni_cfg.morning_start_sec = 9 * 3600 + 35 * 60;
+    omni_cfg.morning_end_sec = 14 * 3600 + 45 * 60;
+    omni_cfg.afternoon_start_sec = 13 * 3600 + 30 * 60;
+    omni_cfg.afternoon_end_sec = 14 * 3600 + 45 * 60;
+    omni_cfg.breakeven_trigger_pct = 0.45;
+    omni_cfg.enable_ofi_harvest = false;
+
+    risk::RiskManager omni_risk_mgr(omni_cfg);
+    const double omni_initial_cap = (omni_capital_override > 0.0) ? omni_capital_override : risk_cfg.initial_capital_inr;
+    execution::PaperBroker omni_broker(omni_initial_cap);
+    execution::TradeAuditor omni_auditor(omni_initial_cap);
+    strategy::MomentumBreakoutStrategy omni_strat(
+        2.5, risk_cfg.min_composite_ofi, whitelist, 5, risk_cfg.circuit_limit_buffer_pct,
+        risk_cfg.take_profit_pct, risk_cfg.stop_loss_pct, risk_cfg.min_bid_depth_ratio,
+        strategy::StrategyMode::OMNI);
+    core::Position omni_position{};
+    core::TradingSignal omni_pending_signal{};
+    PositionLifecycle omni_lifecycle = PositionLifecycle::FLAT;
+    uint64_t omni_next_order_id = 2000001;
+
+    omni_broker.register_fill_callback([&](const core::Order& order, const core::TradeAuditEntry& audit) {
+        const core::Price tick_step = tick_sizes_paise.count(order.token) ? tick_sizes_paise[order.token] : 5;
+        if (audit.quantity == 0) {
+            // Opening Fill (BUY Long or SELL Short)
+            omni_lifecycle = PositionLifecycle::OPEN;
+            omni_position = core::Position{};
+            omni_position.token = order.token;
+            core::copy_fixed_str(omni_position.symbol, order.symbol);
+            omni_position.side = order.side;
+            omni_position.quantity = order.filled_quantity;
+            omni_position.avg_entry_price = order.avg_fill_price;
+            omni_position.current_price = order.avg_fill_price;
+            omni_position.peak_favorable_price = order.avg_fill_price;
+            omni_position.worst_adverse_price = order.avg_fill_price;
+            const bool is_short = (order.side == core::Side::SELL);
+            if (omni_pending_signal.is_valid && omni_pending_signal.target_entry > 0) {
+                if (!is_short) {
+                    const core::Price sl_dist = omni_pending_signal.target_entry - omni_pending_signal.stop_loss;
+                    const core::Price tp_dist = omni_pending_signal.take_profit - omni_pending_signal.target_entry;
+                    omni_position.current_stop_loss = core::floor_to_tick(order.avg_fill_price - sl_dist, tick_step);
+                    omni_position.take_profit = core::ceil_to_tick(order.avg_fill_price + tp_dist, tick_step);
+                } else {
+                    const core::Price sl_dist = omni_pending_signal.stop_loss - omni_pending_signal.target_entry;
+                    const core::Price tp_dist = omni_pending_signal.target_entry - omni_pending_signal.take_profit;
+                    omni_position.current_stop_loss = core::ceil_to_tick(order.avg_fill_price + sl_dist, tick_step);
+                    omni_position.take_profit = core::floor_to_tick(order.avg_fill_price - tp_dist, tick_step);
+                }
+            } else {
+                if (!is_short) {
+                    omni_position.current_stop_loss = core::floor_to_tick(
+                        static_cast<core::Price>(static_cast<double>(order.avg_fill_price) * 0.9915), tick_step);
+                    omni_position.take_profit = core::ceil_to_tick(
+                        static_cast<core::Price>(static_cast<double>(order.avg_fill_price) * 1.0175), tick_step);
+                } else {
+                    omni_position.current_stop_loss = core::ceil_to_tick(
+                        static_cast<core::Price>(static_cast<double>(order.avg_fill_price) * 1.0085), tick_step);
+                    omni_position.take_profit = core::floor_to_tick(
+                        static_cast<core::Price>(static_cast<double>(order.avg_fill_price) * 0.9825), tick_step);
+                }
+            }
+            omni_position.initial_stop_loss = omni_position.current_stop_loss;
+            omni_position.is_breakeven_set = false;
+            omni_position.open_time_ns = order.updated_time_ns;
+            omni_risk_mgr.set_has_active_position(true);
+            if (live_tail || emit_events) {
+                const char* open_side_str = is_short ? "SHORT" : "BUY";
+                std::ostringstream ev_ss;
+                ev_ss << "\n[LIVE_EVENT] {\"type\":\"FILL\",\"track\":\"OMNI\",\"ts_ns\":" << order.updated_time_ns << ",\"side\":\"" << open_side_str
+                      << "\",\"symbol\":\"" << order.symbol << "\",\"qty\":" << order.filled_quantity
+                      << ",\"price\":" << std::fixed << std::setprecision(2) << core::to_inr(order.avg_fill_price)
+                      << ",\"sl\":" << core::to_inr(omni_position.current_stop_loss)
+                      << ",\"tp\":" << core::to_inr(omni_position.take_profit)
+                      << ",\"balance\":" << omni_broker.cash_balance_inr() << "}\n";
+                std::cout << ev_ss.str() << std::flush;
+            }
+        } else {
+            // Closing Fill (SELL Long or COVER Short)
+            omni_lifecycle = PositionLifecycle::FLAT;
+            omni_pending_signal = core::TradingSignal{};
+            omni_risk_mgr.on_trade_closed(audit);
+            omni_strat.on_trade_fill(audit);
+            if (live_tail || emit_events) {
+                const double total_taxes = audit.stt_inr + audit.exchange_fee_inr + audit.gst_inr +
+                                           audit.stamp_duty_inr + audit.sebi_turnover_inr;
+                const char* close_side_str = (audit.side == core::Side::SELL) ? "COVER" : "SELL";
+                std::ostringstream ev_ss;
+                ev_ss << "\n[LIVE_EVENT] {\"type\":\"FILL\",\"track\":\"OMNI\",\"ts_ns\":" << audit.exit_time_ns << ",\"side\":\"" << close_side_str
+                      << "\",\"symbol\":\"" << order.symbol << "\",\"qty\":" << audit.quantity
+                      << ",\"price\":" << std::fixed << std::setprecision(2) << core::to_inr(audit.exit_price)
+                      << ",\"gross_pnl\":" << audit.gross_pnl_inr
+                      << ",\"taxes\":" << total_taxes
+                      << ",\"net_pnl\":" << audit.net_pnl_inr
+                      << ",\"balance\":" << omni_broker.cash_balance_inr() << "}\n";
+                std::cout << ev_ss.str() << std::flush;
+            }
+        }
+    });
+
+    auto try_submit_omni_signal = [&](const core::TradingSignal& sig,
+                                      const market::OrderBook& book,
+                                      uint64_t current_time_ns) {
+        if (omni_lifecycle != PositionLifecycle::FLAT) return;
+        const bool macro_frozen = macro_calendar.is_frozen(current_time_ns);
+        const bool near_circuit = book.is_near_circuit(omni_cfg.circuit_limit_buffer_pct);
+        const auto [sized_qty, rejection] =
+            omni_risk_mgr.evaluate_and_size_order(sig, current_time_ns, macro_frozen, near_circuit);
+        if (rejection != risk::RiskRejection::NONE) return;
+
+        core::Order new_order{};
+        new_order.client_order_id = omni_next_order_id++;
+        new_order.token = sig.token;
+        core::copy_fixed_str(new_order.symbol, sig.symbol);
+        new_order.side = sig.side;
+        new_order.type = core::OrderType::MARKET;
+        new_order.price = sig.target_entry;
+        new_order.quantity = sized_qty;
+        new_order.created_time_ns = current_time_ns;
+
+        if (omni_broker.place_order(new_order)) {
+            omni_lifecycle = PositionLifecycle::PENDING_ENTRY;
+            omni_pending_signal = sig;
+            omni_risk_mgr.set_has_active_position(true);
         }
     };
 
@@ -504,6 +641,13 @@ int main(int argc, char* argv[]) {
                         harv_risk_mgr.check_day_rollover(tick.timestamp_ns);
                         harv_auditor.on_session_start(tick_ist_day, execution::TradeAuditor::format_ist_date(tick.timestamp_ns));
                         harv_strat.reset_daily_session();
+
+                        omni_lifecycle = PositionLifecycle::FLAT;
+                        omni_position = core::Position{};
+                        omni_pending_signal = core::TradingSignal{};
+                        omni_risk_mgr.check_day_rollover(tick.timestamp_ns);
+                        omni_auditor.on_session_start(tick_ist_day, execution::TradeAuditor::format_ist_date(tick.timestamp_ns));
+                        omni_strat.reset_daily_session();
                     }
                     for (auto& [tok, book_inst] : books) {
                         book_inst.reset_daily_session();
@@ -515,6 +659,8 @@ int main(int argc, char* argv[]) {
                     if (enable_parallel_harvester) {
                         harv_risk_mgr.check_day_rollover(tick.timestamp_ns);
                         harv_auditor.on_session_start(tick_ist_day, execution::TradeAuditor::format_ist_date(tick.timestamp_ns));
+                        omni_risk_mgr.check_day_rollover(tick.timestamp_ns);
+                        omni_auditor.on_session_start(tick_ist_day, execution::TradeAuditor::format_ist_date(tick.timestamp_ns));
                     }
                 }
                 current_ist_day = tick_ist_day;
@@ -533,12 +679,14 @@ int main(int argc, char* argv[]) {
             broker.on_next_tick(tick, book);
             if (enable_parallel_harvester) {
                 harv_broker.on_next_tick(tick, book);
+                omni_broker.on_next_tick(tick, book);
             }
 
             // C. Always advance strategy rolling volume & VWAP state (even while holding a position!)
             momentum_strat.on_tick(tick, book);
             if (enable_parallel_harvester) {
                 harv_strat.on_tick(tick, book);
+                omni_strat.on_tick(tick, book);
             }
 
             // D. Drain any queued external trader webhook alerts once local order book is live
@@ -559,6 +707,7 @@ int main(int argc, char* argv[]) {
                     try_submit_signal(*ext_sig, b_it->second, tick.timestamp_ns);
                     if (enable_parallel_harvester) {
                         try_submit_harv_signal(*ext_sig, b_it->second, tick.timestamp_ns);
+                        try_submit_omni_signal(*ext_sig, b_it->second, tick.timestamp_ns);
                     }
                 }
             }
@@ -586,6 +735,31 @@ int main(int argc, char* argv[]) {
                     if (const auto h_sig = harv_strat.generate_signal(book);
                         h_sig.has_value() && h_sig->is_valid) {
                         try_submit_harv_signal(*h_sig, book, tick.timestamp_ns);
+                    }
+                }
+
+                // D3. Manage Parallel Track C (Bi-Directional Omni) Open Position & Signal Generation
+                if (omni_lifecycle == PositionLifecycle::OPEN && tick.token == omni_position.token) {
+                    const core::Price tick_step = tick_sizes_paise.count(tick.token) ? tick_sizes_paise[tick.token] : 5;
+                    const auto [o_should_exit, o_exit_reason] =
+                        omni_risk_mgr.check_position_rules(omni_position, tick.last_price, tick.timestamp_ns, tick_step, &book);
+                    if (o_should_exit) {
+                        core::Order exit_order{};
+                        exit_order.client_order_id = omni_next_order_id++;
+                        exit_order.token = omni_position.token;
+                        core::copy_fixed_str(exit_order.symbol, omni_position.symbol);
+                        exit_order.side = (omni_position.side == core::Side::BUY) ? core::Side::SELL : core::Side::BUY;
+                        exit_order.type = core::OrderType::MARKET;
+                        exit_order.quantity = omni_position.quantity;
+                        exit_order.created_time_ns = tick.timestamp_ns;
+                        if (omni_broker.place_order(exit_order)) {
+                            omni_lifecycle = PositionLifecycle::PENDING_EXIT;
+                        }
+                    }
+                } else if (omni_lifecycle == PositionLifecycle::FLAT) {
+                    if (const auto o_sig = omni_strat.generate_signal(book);
+                        o_sig.has_value() && o_sig->is_valid) {
+                        try_submit_omni_signal(*o_sig, book, tick.timestamp_ns);
                     }
                 }
             }
@@ -668,6 +842,20 @@ int main(int argc, char* argv[]) {
         const auto harv_report =
             harv_auditor.generate_report(harv_broker.trade_history(), harv_risk_mgr.kill_switch_history());
         execution::TradeAuditor::print_dual_mode_comparison(multi_day_report, harv_report, report_buf);
+
+        omni_risk_mgr.finalize_session();
+        const auto omni_report =
+            omni_auditor.generate_report(omni_broker.trade_history(), omni_risk_mgr.kill_switch_history());
+        report_buf << "\n============================================================================================================================\n"
+                   << "               TRACK C (BI-DIRECTIONAL OMNI: LONG + SHORT + FULL-DAY) SUMMARY                                               \n"
+                   << "============================================================================================================================\n"
+                   << "  Initial Capital: INR " << std::fixed << std::setprecision(2) << omni_report.aggregate.initial_capital_inr
+                   << " | Ending Equity: INR " << omni_report.aggregate.ending_capital_inr
+                   << " | Net PnL: " << (omni_report.aggregate.net_pnl_inr >= 0 ? "+" : "") << omni_report.aggregate.net_pnl_inr << " INR"
+                   << " (" << (omni_report.aggregate.net_return_pct >= 0 ? "+" : "") << omni_report.aggregate.net_return_pct << "%)"
+                   << " | Trades: " << omni_report.aggregate.total_trades
+                   << " (WR: " << omni_report.aggregate.win_rate_pct << "%)\n"
+                   << "============================================================================================================================\n";
     }
     std::cout << report_buf.str();
     std::string report_line;
