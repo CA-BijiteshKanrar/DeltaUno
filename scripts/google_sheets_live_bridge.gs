@@ -123,10 +123,10 @@ function doPost(e) {
       dashSheet.getRange(13, 1, 1, 6).setFontWeight("bold").setBackground("#1b5e20").setFontColor("#ffffff");
     }
 
-    // 4. Handle EOD Daily Summary
+    // 4. Handle EOD Daily Summary (deduplicated by Date IST)
     if (eventType === "DAILY_SUMMARY" && payload.summary) {
       var s = payload.summary;
-      summarySheet.appendRow([
+      var newRow = [
         s.date_ist || "",
         s.source || "LOCAL",
         s.provider || "",
@@ -141,7 +141,26 @@ function doPost(e) {
         s.harv_ret_pct || 0,
         s.harv_trades || 0,
         s.harv_win_rate || 0
-      ]);
+      ];
+      var existingLastRow = summarySheet.getLastRow();
+      var updatedExisting = false;
+      if (existingLastRow > 1 && s.date_ist) {
+        var existingData = summarySheet.getRange(2, 1, existingLastRow - 1, 14).getValues();
+        for (var rIdx = 0; rIdx < existingData.length; rIdx++) {
+          var rowDate = Utilities.formatDate(new Date(existingData[rIdx][0]), "Asia/Kolkata", "yyyy-MM-dd");
+          if (String(existingData[rIdx][0]).trim() === String(s.date_ist).trim() || rowDate === String(s.date_ist).trim()) {
+            var prevTicks = parseInt(existingData[rIdx][3], 10) || 0;
+            if ((s.ticks || 0) >= prevTicks) {
+              summarySheet.getRange(rIdx + 2, 1, 1, 14).setValues([newRow]);
+            }
+            updatedExisting = true;
+            break;
+          }
+        }
+      }
+      if (!updatedExisting) {
+        summarySheet.appendRow(newRow);
+      }
 
       try {
         createAnalyticsCharts();
@@ -210,7 +229,8 @@ function reconcileMultiDayBalances() {
     var reconciledRows = [
       headers,
       ["2026-10-26", "GITHUB_ACTIONS", "ANGELONE", 60255, 10155.12, 155.12, 1.55, 2, 50.0, 10017.29, 17.30, 0.17, 3, 100.0],
-      ["2026-10-27", "GITHUB_ACTIONS", "UPSTOX", 78205, 10107.49, -47.63, -0.47, 2, 50.0, 9976.19, -41.11, -0.41, 3, 66.7]
+      ["2026-10-27", "GITHUB_ACTIONS", "UPSTOX", 78205, 10107.49, -47.63, -0.47, 2, 50.0, 9976.19, -41.11, -0.41, 3, 66.7],
+      ["2026-10-28", "GITHUB_ACTIONS", "UPSTOX", 79460, 10148.51, 41.02, 0.41, 2, 100.0, 9940.15, -36.04, -0.36, 3, 66.7]
     ];
     summarySheet.clear();
     summarySheet.getRange(1, 1, reconciledRows.length, 14).setValues(reconciledRows);

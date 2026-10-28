@@ -149,8 +149,29 @@ class LiveQuoteProvider:
         self.provider = self._detect_provider(requested_provider)
         self.angel_jwt: Optional[str] = os.environ.get("ANGELONE_JWT_TOKEN")
         self._angel_conn: Optional[http.client.HTTPSConnection] = None
+        self._upstox_conn: Optional[http.client.HTTPSConnection] = None
+        self._last_nifty_ts: float = 0.0
+        self._last_nifty_meta: Optional[Tuple[float, float, float]] = None
         self.prev_volumes: Dict[str, int] = {}
         self.prev_prices: Dict[str, float] = {}
+
+    @staticmethod
+    def _has_angelone_creds() -> bool:
+        return bool(
+            os.environ.get("ANGELONE_API_KEY")
+            and (
+                os.environ.get("ANGELONE_JWT_TOKEN")
+                or (
+                    os.environ.get("ANGELONE_CLIENT_CODE")
+                    and os.environ.get("ANGELONE_PIN")
+                    and os.environ.get("ANGELONE_TOTP_SECRET")
+                )
+            )
+        )
+
+    @staticmethod
+    def _has_upstox_creds() -> bool:
+        return bool(os.environ.get("UPSTOX_ACCESS_TOKEN"))
 
     def _detect_provider(self, requested: str) -> str:
         req = requested.lower()
@@ -158,17 +179,12 @@ class LiveQuoteProvider:
             return req
         if os.environ.get("ZERODHA_API_KEY") and os.environ.get("ZERODHA_ACCESS_TOKEN"):
             return "zerodha"
-        if os.environ.get("UPSTOX_ACCESS_TOKEN"):
-            return "upstox"
-        if os.environ.get("ANGELONE_API_KEY") and (
-            os.environ.get("ANGELONE_JWT_TOKEN")
-            or (
-                os.environ.get("ANGELONE_CLIENT_CODE")
-                and os.environ.get("ANGELONE_PIN")
-                and os.environ.get("ANGELONE_TOTP_SECRET")
-            )
-        ):
+        # Angel One is Primary (0 timeouts, persistent keep-alive, daily auto-TOTP)
+        if self._has_angelone_creds():
             return "angelone"
+        # Upstox is Hot-Standby Secondary
+        if self._has_upstox_creds():
+            return "upstox"
         return "yahoo"
 
     def _angelone_login(self) -> Optional[str]:
@@ -203,28 +219,52 @@ class LiveQuoteProvider:
         return None
 
     def fetch_all_ticks(self) -> List[str]:
-        """Fetch live quotes for all 5 instruments and return formatted CSV lines."""
+        """
+        Fetch live quotes for all 5 instruments using Dual-Broker Hot-Failover:
+        Primary L2 Broker (AngelOne/Upstox) -> Standby L2 Broker (Upstox/AngelOne) -> Yahoo Last-Resort.
+        """
         try:
             if self.provider == "zerodha":
                 return self._fetch_zerodha()
-            if self.provider == "upstox":
-                return self._fetch_upstox()
             if self.provider == "angelone":
                 return self._fetch_angelone()
-        except Exception as e:
-            print(f"[WARN] Broker provider '{self.provider}' error ({e}); falling back to Yahoo Live.", flush=True)
+            if self.provider == "upstox":
+                return self._fetch_upstox()
+        except Exception as primary_err:
+            # Hot-Failover to secondary real L2 broker before touching synthetic Yahoo depth
+            if self.provider == "angelone" and self._has_upstox_creds():
+                try:
+                    return self._fetch_upstox()
+                except Exception as sec_err:
+                    print(f"[WARN] Primary 'angelone' ({primary_err}) & Standby 'upstox' ({sec_err}) failed; falling back to Yahoo.", flush=True)
+                    return self._fetch_yahoo()
+            elif self.provider == "upstox" and self._has_angelone_creds():
+                try:
+                    return self._fetch_angelone()
+                except Exception as sec_err:
+                    print(f"[WARN] Primary 'upstox' ({primary_err}) & Standby 'angelone' ({sec_err}) failed; falling back to Yahoo.", flush=True)
+                    return self._fetch_yahoo()
+            print(f"[WARN] Broker provider '{self.provider}' error ({primary_err}); falling back to Yahoo Live.", flush=True)
         return self._fetch_yahoo()
 
     def fetch_nifty_quote(self) -> Optional[Tuple[str, float, float]]:
-        """Fetch NIFTY 50 index benchmark. Returns (csv_line, ltp, ret_pct) or None."""
+        """Fetch NIFTY 50 index benchmark (cached 10s to keep 1s L2 loop ultra-fast). Returns (csv_line, ltp, ret_pct) or None."""
+        now_mono = time.monotonic()
+        if self._last_nifty_meta is not None and (now_mono - self._last_nifty_ts) < 10.0:
+            ltp, prev_close, ret_pct = self._last_nifty_meta
+            ts_ns = time.time_ns()
+            line = f"{ts_ns},999999,NIFTY,{ltp:.2f},1,100000,{ltp:.2f},100,{ltp+0.05:.2f},100,{prev_close*1.1:.2f},{prev_close*0.9:.2f}"
+            return line, ltp, ret_pct
         try:
             url = "https://query1.finance.yahoo.com/v8/finance/chart/%5ENSEI?range=1d&interval=1m"
             req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
-            with urllib.request.urlopen(req, timeout=2.5) as resp:
+            with urllib.request.urlopen(req, timeout=2.0) as resp:
                 res = json.loads(resp.read().decode("utf-8"))["chart"]["result"][0]["meta"]
             ltp = float(res.get("regularMarketPrice", 22500.0))
             prev_close = float(res.get("chartPreviousClose", ltp))
             ret_pct = ((ltp - prev_close) / prev_close) * 100.0 if prev_close > 0 else 0.0
+            self._last_nifty_ts = now_mono
+            self._last_nifty_meta = (ltp, prev_close, ret_pct)
             ts_ns = time.time_ns()
             line = f"{ts_ns},999999,NIFTY,{ltp:.2f},1,100000,{ltp:.2f},100,{ltp+0.05:.2f},100,{prev_close*1.1:.2f},{prev_close*0.9:.2f}"
             return line, ltp, ret_pct
@@ -316,19 +356,39 @@ class LiveQuoteProvider:
     def _fetch_upstox(self) -> List[str]:
         access_token = os.environ["UPSTOX_ACCESS_TOKEN"]
         keys = ",".join(inst["upstox_key"] for inst in INSTRUMENTS)
-        url = f"https://api.upstox.com/v2/market-quote/quotes?instrument_key={urllib.parse.quote(keys, safe=',')}"
-        req = urllib.request.Request(
-            url,
-            headers={
-                "Accept": "application/json",
-                "Authorization": f"Bearer {access_token}",
-                "User-Agent": "DeltaUno/1.0",
-            },
-        )
+        path = f"/v2/market-quote/quotes?instrument_key={urllib.parse.quote(keys, safe=',')}"
+        headers = {
+            "Accept": "application/json",
+            "Authorization": f"Bearer {access_token}",
+            "Connection": "keep-alive",
+            "User-Agent": "DeltaUno/1.0",
+        }
+        raw_resp = b""
+        for attempt in range(2):
+            try:
+                if self._upstox_conn is None:
+                    self._upstox_conn = http.client.HTTPSConnection("api.upstox.com", timeout=3.0)
+                self._upstox_conn.request("GET", path, headers=headers)
+                resp = self._upstox_conn.getresponse()
+                raw_resp = resp.read()
+                if resp.status == 200 and raw_resp:
+                    break
+                self._upstox_conn.close()
+                self._upstox_conn = None
+                if resp.status in (401, 403):
+                    raise RuntimeError(f"Upstox HTTP {resp.status}")
+            except Exception:
+                if self._upstox_conn is not None:
+                    try:
+                        self._upstox_conn.close()
+                    except Exception:
+                        pass
+                    self._upstox_conn = None
+                if attempt == 1:
+                    raise
         ts_ns = time.time_ns()
         lines = []
-        with urllib.request.urlopen(req, timeout=4.0) as resp:
-            payload = json.loads(resp.read().decode("utf-8")).get("data", {})
+        payload = json.loads(raw_resp.decode("utf-8")).get("data", {})
         
         # Index payload by instrument_token (e.g. "NSE_EQ|INE...") and symbol
         by_token = {}
@@ -602,6 +662,28 @@ class GoogleSheetsLiveSync:
     """Streams real-time Dual-Mode trades, 60s heartbeats, and EOD summary to Google Sheets."""
 
     @staticmethod
+    def has_completed_session_today(sheet_id: str, today_str: str) -> bool:
+        """Check if Daily_Summary already has a completed full session (>10,000 ticks) for today_str."""
+        if not sheet_id:
+            return False
+        try:
+            import csv, io
+            url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/gviz/tq?tqx=out:csv&sheet=Daily_Summary"
+            req = urllib.request.Request(url, headers={"User-Agent": "DeltaUno-Monitor"})
+            with urllib.request.urlopen(req, timeout=5.0) as r:
+                content = r.read().decode("utf-8", errors="replace")
+            for row in csv.reader(io.StringIO(content)):
+                if len(row) >= 4 and row[0].strip() == today_str:
+                    try:
+                        if int(float(row[3].strip())) >= 10000:
+                            return True
+                    except ValueError:
+                        pass
+            return False
+        except Exception:
+            return False
+
+    @staticmethod
     def fetch_prior_closing_balances(sheet_id: str) -> Tuple[float, float]:
         """Fetch prior session closing equity from Google Sheet Live_Trades tab for multi-day compounding."""
         if not sheet_id:
@@ -644,6 +726,8 @@ class GoogleSheetsLiveSync:
         self.lock = threading.Lock()
         self.ticks_streamed = 0
         self.latest_quotes: List[Dict[str, Any]] = []
+        self.initial_comp_equity = float(initial_comp_equity)
+        self.initial_harv_equity = float(initial_harv_equity)
 
         self.nifty_ltp: float = 0.0
         self.nifty_ret_pct: float = 0.0
@@ -796,6 +880,10 @@ class GoogleSheetsLiveSync:
             h = self.tracks["HARVESTER"]
             c_wr = (c["wins"] / c["trades"] * 100.0) if c["trades"] > 0 else 0.0
             h_wr = (h["wins"] / h["trades"] * 100.0) if h["trades"] > 0 else 0.0
+            comp_day_pnl = round(c["equity"] - self.initial_comp_equity, 2)
+            harv_day_pnl = round(h["equity"] - self.initial_harv_equity, 2)
+            comp_day_ret = round((comp_day_pnl / self.initial_comp_equity) * 100.0, 2) if self.initial_comp_equity > 0 else 0.0
+            harv_day_ret = round((harv_day_pnl / self.initial_harv_equity) * 100.0, 2) if self.initial_harv_equity > 0 else 0.0
             dash = self._build_dashboard_dict("SESSION_COMPLETED")
             summary = {
                 "date_ist": datetime.now(TZ_IST).strftime("%Y-%m-%d"),
@@ -803,13 +891,13 @@ class GoogleSheetsLiveSync:
                 "provider": self.provider_name,
                 "ticks": self.ticks_streamed,
                 "comp_equity": round(c["equity"], 2),
-                "comp_pnl": round(c["pnl"], 2),
-                "comp_ret_pct": round((c["pnl"] / 10000.0) * 100.0, 2),
+                "comp_pnl": comp_day_pnl,
+                "comp_ret_pct": comp_day_ret,
                 "comp_trades": c["trades"],
                 "comp_win_rate": round(c_wr, 2),
                 "harv_equity": round(h["equity"], 2),
-                "harv_pnl": round(h["pnl"], 2),
-                "harv_ret_pct": round((h["pnl"] / 10000.0) * 100.0, 2),
+                "harv_pnl": harv_day_pnl,
+                "harv_ret_pct": harv_day_ret,
                 "harv_trades": h["trades"],
                 "harv_win_rate": round(h_wr, 2),
             }
@@ -914,6 +1002,10 @@ def main() -> int:
     sheets_sync = GoogleSheetsLiveSync(sheets_url, provider.provider, args.mode, comp_init_cap, harv_init_cap)
 
     now_ist = datetime.now(TZ_IST)
+    today_iso = now_ist.strftime("%Y-%m-%d")
+    if not args.start_now and GoogleSheetsLiveSync.has_completed_session_today(sheet_id, today_iso):
+        print(f"[SKIP] Full trading session already recorded in Daily_Summary for {today_iso}. Exiting duplicate scheduled run cleanly.")
+        return 0
     date_tag = now_ist.strftime("%Y%m%d")
     live_csv = REPO_ROOT / "data" / f"live_ticks_{date_tag}.csv"
 
