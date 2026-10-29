@@ -190,6 +190,11 @@ int main(int argc, char* argv[]) {
     const bool enable_parallel_harvester = (run_mode == "both");
 
     core::RiskConfig primary_risk_cfg = risk_cfg;
+    if (live_tail || emit_events || initial_capital_override > 0.0 || harv_capital_override > 0.0 || omni_capital_override > 0.0) {
+        // Gao, Han, Li & Zhou (2018): 15:14:00 IST captures the closing institutional momentum wave
+        // while exiting 1 minute prior to the 15:15:00 IST broker MIS RMS auto-squareoff window.
+        primary_risk_cfg.auto_squareoff_sec = 15 * 3600 + 14 * 60;
+    }
     if (primary_is_harvester) {
         primary_risk_cfg.max_position_value_inr = 5000.0;
         primary_risk_cfg.breakeven_trigger_pct = 1.0;
@@ -222,6 +227,7 @@ int main(int argc, char* argv[]) {
     harv_cfg.max_position_value_inr = 9800.0;
     harv_cfg.breakeven_trigger_pct = 1.0;
     harv_cfg.afternoon_end_sec = 14 * 3600 + 45 * 60;
+    harv_cfg.auto_squareoff_sec = 15 * 3600 + 14 * 60;
     harv_cfg.enable_ofi_harvest = true;
 
     const double harv_initial_cap = (harv_capital_override > 0.0) ? harv_capital_override : risk_cfg.initial_capital_inr;
@@ -268,12 +274,14 @@ int main(int argc, char* argv[]) {
             harv_position.open_time_ns = order.updated_time_ns;
             harv_risk_mgr.set_has_active_position(true);
             if (live_tail || emit_events) {
-                std::cout << "[LIVE_EVENT] {\"type\":\"FILL\",\"track\":\"HARVESTER\",\"ts_ns\":" << order.updated_time_ns << ",\"side\":\"BUY\",\"symbol\":\""
-                          << order.symbol << "\",\"qty\":" << order.filled_quantity
-                          << ",\"price\":" << std::fixed << std::setprecision(2) << core::to_inr(order.avg_fill_price)
-                          << ",\"sl\":" << core::to_inr(harv_position.current_stop_loss)
-                          << ",\"tp\":" << core::to_inr(harv_position.take_profit)
-                          << ",\"balance\":" << harv_broker.cash_balance_inr() << "}\n" << std::flush;
+                std::ostringstream ev_ss;
+                ev_ss << "\n[LIVE_EVENT] {\"type\":\"FILL\",\"track\":\"HARVESTER\",\"ts_ns\":" << order.updated_time_ns << ",\"side\":\"BUY\",\"symbol\":\""
+                      << order.symbol << "\",\"qty\":" << order.filled_quantity
+                      << ",\"price\":" << std::fixed << std::setprecision(2) << core::to_inr(order.avg_fill_price)
+                      << ",\"sl\":" << core::to_inr(harv_position.current_stop_loss)
+                      << ",\"tp\":" << core::to_inr(harv_position.take_profit)
+                      << ",\"balance\":" << harv_broker.cash_balance_inr() << "}\n";
+                std::cout << ev_ss.str() << std::flush;
             }
         } else if (order.side == core::Side::SELL) {
             harv_lifecycle = PositionLifecycle::FLAT;
@@ -283,13 +291,15 @@ int main(int argc, char* argv[]) {
             if (live_tail || emit_events) {
                 const double total_taxes = audit.stt_inr + audit.exchange_fee_inr + audit.gst_inr +
                                            audit.stamp_duty_inr + audit.sebi_turnover_inr;
-                std::cout << "[LIVE_EVENT] {\"type\":\"FILL\",\"track\":\"HARVESTER\",\"ts_ns\":" << audit.exit_time_ns << ",\"side\":\"SELL\",\"symbol\":\""
-                          << order.symbol << "\",\"qty\":" << audit.quantity
-                          << ",\"price\":" << std::fixed << std::setprecision(2) << core::to_inr(audit.exit_price)
-                          << ",\"gross_pnl\":" << audit.gross_pnl_inr
-                          << ",\"taxes\":" << total_taxes
-                          << ",\"net_pnl\":" << audit.net_pnl_inr
-                          << ",\"balance\":" << harv_broker.cash_balance_inr() << "}\n" << std::flush;
+                std::ostringstream ev_ss;
+                ev_ss << "\n[LIVE_EVENT] {\"type\":\"FILL\",\"track\":\"HARVESTER\",\"ts_ns\":" << audit.exit_time_ns << ",\"side\":\"SELL\",\"symbol\":\""
+                      << order.symbol << "\",\"qty\":" << audit.quantity
+                      << ",\"price\":" << std::fixed << std::setprecision(2) << core::to_inr(audit.exit_price)
+                      << ",\"gross_pnl\":" << audit.gross_pnl_inr
+                      << ",\"taxes\":" << total_taxes
+                      << ",\"net_pnl\":" << audit.net_pnl_inr
+                      << ",\"balance\":" << harv_broker.cash_balance_inr() << "}\n";
+                std::cout << ev_ss.str() << std::flush;
             }
         }
     });
@@ -327,6 +337,7 @@ int main(int argc, char* argv[]) {
     omni_cfg.morning_end_sec = 14 * 3600 + 45 * 60;
     omni_cfg.afternoon_start_sec = 13 * 3600 + 30 * 60;
     omni_cfg.afternoon_end_sec = 14 * 3600 + 45 * 60;
+    omni_cfg.auto_squareoff_sec = 15 * 3600 + 14 * 60;
     omni_cfg.breakeven_trigger_pct = 0.90;
     omni_cfg.enable_ofi_harvest = false;
     omni_cfg.max_risk_per_trade_inr = 180.0;   // Moskowitz et al. (2012) 1.80% volatility/risk target
@@ -572,15 +583,18 @@ int main(int argc, char* argv[]) {
                << " | SL=" << core::to_inr(current_position.current_stop_loss)
                << " | TP=" << core::to_inr(current_position.take_profit);
             LOG_TRADE(ss.str());
-            if (live_tail) {
+            if (live_tail || emit_events) {
                 const char* trk = primary_is_harvester ? "HARVESTER" : "COMPOUNDER";
-                std::cout << "[LIVE_EVENT] {\"type\":\"FILL\",\"track\":\"" << trk
-                          << "\",\"side\":\"BUY\",\"symbol\":\"" << order.symbol
-                          << "\",\"qty\":" << order.filled_quantity
-                          << ",\"price\":" << std::fixed << std::setprecision(2) << core::to_inr(order.avg_fill_price)
-                          << ",\"sl\":" << core::to_inr(current_position.current_stop_loss)
-                          << ",\"tp\":" << core::to_inr(current_position.take_profit)
-                          << ",\"balance\":" << broker.cash_balance_inr() << "}\n" << std::flush;
+                std::ostringstream ev_ss;
+                ev_ss << "\n[LIVE_EVENT] {\"type\":\"FILL\",\"track\":\"" << trk
+                      << "\",\"ts_ns\":" << order.updated_time_ns
+                      << ",\"side\":\"BUY\",\"symbol\":\"" << order.symbol
+                      << "\",\"qty\":" << order.filled_quantity
+                      << ",\"price\":" << std::fixed << std::setprecision(2) << core::to_inr(order.avg_fill_price)
+                      << ",\"sl\":" << core::to_inr(current_position.current_stop_loss)
+                      << ",\"tp\":" << core::to_inr(current_position.take_profit)
+                      << ",\"balance\":" << broker.cash_balance_inr() << "}\n";
+                std::cout << ev_ss.str() << std::flush;
             }
         } else if (order.side == core::Side::SELL) {
             lifecycle = PositionLifecycle::FLAT;
@@ -603,16 +617,19 @@ int main(int argc, char* argv[]) {
                << " | MFE: " << core::to_inr(audit.max_favorable_excursion) << " INR"
                << " | Balance: " << broker.cash_balance_inr() << " INR";
             LOG_TRADE(ss.str());
-            if (live_tail) {
+            if (live_tail || emit_events) {
                 const char* trk = primary_is_harvester ? "HARVESTER" : "COMPOUNDER";
-                std::cout << "[LIVE_EVENT] {\"type\":\"FILL\",\"track\":\"" << trk
-                          << "\",\"side\":\"SELL\",\"symbol\":\"" << order.symbol
-                          << "\",\"qty\":" << audit.quantity
-                          << ",\"price\":" << std::fixed << std::setprecision(2) << core::to_inr(audit.exit_price)
-                          << ",\"gross_pnl\":" << audit.gross_pnl_inr
-                          << ",\"taxes\":" << total_taxes
-                          << ",\"net_pnl\":" << audit.net_pnl_inr
-                          << ",\"balance\":" << broker.cash_balance_inr() << "}\n" << std::flush;
+                std::ostringstream ev_ss;
+                ev_ss << "\n[LIVE_EVENT] {\"type\":\"FILL\",\"track\":\"" << trk
+                      << "\",\"ts_ns\":" << audit.exit_time_ns
+                      << ",\"side\":\"SELL\",\"symbol\":\"" << order.symbol
+                      << "\",\"qty\":" << audit.quantity
+                      << ",\"price\":" << std::fixed << std::setprecision(2) << core::to_inr(audit.exit_price)
+                      << ",\"gross_pnl\":" << audit.gross_pnl_inr
+                      << ",\"taxes\":" << total_taxes
+                      << ",\"net_pnl\":" << audit.net_pnl_inr
+                      << ",\"balance\":" << broker.cash_balance_inr() << "}\n";
+                std::cout << ev_ss.str() << std::flush;
             }
         }
     });

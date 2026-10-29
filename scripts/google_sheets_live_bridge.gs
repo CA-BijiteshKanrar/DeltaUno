@@ -343,94 +343,85 @@ function doPost(e) {
 function reconcileMultiDayBalances() {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
 
+  var compHistoricalRows = [
+    ["2026-10-26 09:35:37 IST", "GITHUB_ACTIONS", "COMPOUNDER", "BUY", "SBIN", 10, 947.62, 939.5, 964.25, "", "", "", 10000.0],
+    ["2026-10-26 11:35:14 IST", "GITHUB_ACTIONS", "COMPOUNDER", "SELL", "SBIN", 10, 948.9, "", "", 12.8, 3.34, 9.46, 10009.46],
+    ["2026-10-26 13:31:57 IST", "GITHUB_ACTIONS", "COMPOUNDER", "BUY", "TATASTEEL", 58, 168.9, 167.45, 171.85, "", "", "", 10009.46],
+    ["2026-10-26 15:14:03 IST", "GITHUB_ACTIONS", "COMPOUNDER", "SELL", "TATASTEEL", 58, 168.58, "", "", -18.56, 3.45, -22.01, 9987.45],
+    ["2026-10-27 09:48:52 IST", "GITHUB_ACTIONS", "COMPOUNDER", "BUY", "ITC", 37, 260.49, 258.2, 265.05, "", "", "", 9987.45],
+    ["2026-10-27 11:01:18 IST", "GITHUB_ACTIONS", "COMPOUNDER", "SELL", "ITC", 37, 258.22, "", "", -83.99, 3.37, -87.36, 9900.09],
+    ["2026-10-27 13:50:00 IST", "GITHUB_ACTIONS", "COMPOUNDER", "BUY", "ZOMATO", 29, 327.33, 324.5, 333.1, "", "", "", 9900.09],
+    ["2026-10-27 15:14:02 IST", "GITHUB_ACTIONS", "COMPOUNDER", "SELL", "ZOMATO", 29, 330.46, "", "", 90.77, 3.37, 87.4, 9987.49],
+    ["2026-10-28 09:35:01 IST", "GITHUB_ACTIONS", "COMPOUNDER", "BUY", "SBIN", 10, 952.8, 944.7, 969.5, "", "", "", 9987.49],
+    ["2026-10-28 12:10:02 IST", "GITHUB_ACTIONS", "COMPOUNDER", "SELL", "SBIN", 10, 953.85, "", "", 10.5, 3.36, 7.14, 9994.63],
+    ["2026-10-28 13:33:22 IST", "GITHUB_ACTIONS", "COMPOUNDER", "BUY", "ITC", 38, 257.18, 254.95, 261.7, "", "", "", 9994.63],
+    ["2026-10-28 15:14:01 IST", "GITHUB_ACTIONS", "COMPOUNDER", "SELL", "ITC", 38, 258.07, "", "", 33.82, 3.45, 30.37, 10024.99],
+    ["2026-10-29 13:30:21 IST", "GITHUB_ACTIONS", "COMPOUNDER", "BUY", "TRENT", 3, 2864.42, 2840.05, 2914.6, "", "", "", 10024.99],
+    ["2026-10-29 13:38:17 IST", "GITHUB_ACTIONS", "COMPOUNDER", "SELL", "TRENT", 3, 2868.1, "", "", 11.04, 3.03, 8.01, 10033.0],
+    ["2026-10-29 13:39:05 IST", "GITHUB_ACTIONS", "COMPOUNDER", "BUY", "TATAMOTORS", 37, 264.49, 262.2, 269.15, "", "", "", 10033.0],
+    ["2026-10-29 15:14:01 IST", "GITHUB_ACTIONS", "COMPOUNDER", "SELL", "TATAMOTORS", 37, 266.57, "", "", 76.96, 3.47, 73.49, 10106.49],
+  ];
+
   var harvHistoricalRows = [
-    ["2026-10-26 09:37:11 IST", "GITHUB_ACTIONS", "HARVESTER", "BUY", "TATASTEEL", 58, 166.88, 165.90, 169.90, "", "", "", 10000.00],
-    ["2026-10-26 09:53:26 IST", "GITHUB_ACTIONS", "HARVESTER", "SELL", "TATASTEEL", 58, 167.58, "", "", 40.60, 3.42, 37.18, 10037.18],
-    ["2026-10-26 09:53:32 IST", "GITHUB_ACTIONS", "HARVESTER", "BUY", "COALINDIA", 24, 400.40, 398.15, 407.60, "", "", "", 10037.18],
-    ["2026-10-26 09:59:02 IST", "GITHUB_ACTIONS", "HARVESTER", "SELL", "COALINDIA", 24, 401.90, "", "", 36.00, 3.40, 32.60, 10069.78],
-    ["2026-10-27 09:50:02 IST", "GITHUB_ACTIONS", "HARVESTER", "BUY", "TATASTEEL", 57, 170.67, 169.70, 173.80, "", "", "", 10069.78],
+    ["2026-10-26 09:37:11 IST", "GITHUB_ACTIONS", "HARVESTER", "BUY", "TATASTEEL", 58, 166.88, 165.9, 169.9, "", "", "", 10000.0],
+    ["2026-10-26 09:53:26 IST", "GITHUB_ACTIONS", "HARVESTER", "SELL", "TATASTEEL", 58, 167.58, "", "", 40.6, 3.42, 37.18, 10037.18],
+    ["2026-10-26 09:53:32 IST", "GITHUB_ACTIONS", "HARVESTER", "BUY", "COALINDIA", 24, 400.4, 398.15, 407.6, "", "", "", 10037.18],
+    ["2026-10-26 09:59:02 IST", "GITHUB_ACTIONS", "HARVESTER", "SELL", "COALINDIA", 24, 401.9, "", "", 36.0, 3.4, 32.6, 10069.78],
+    ["2026-10-27 09:50:02 IST", "GITHUB_ACTIONS", "HARVESTER", "BUY", "TATASTEEL", 57, 170.67, 169.7, 173.8, "", "", "", 10069.78],
     ["2026-10-27 10:01:39 IST", "GITHUB_ACTIONS", "HARVESTER", "SELL", "TATASTEEL", 57, 171.43, "", "", 43.32, 3.44, 39.88, 10109.66],
-    ["2026-10-27 10:10:24 IST", "GITHUB_ACTIONS", "HARVESTER", "BUY", "SBIN", 10, 963.11, 957.80, 980.50, "", "", "", 10109.66],
-    ["2026-10-27 11:42:25 IST", "GITHUB_ACTIONS", "HARVESTER", "SELL", "SBIN", 10, 957.84, "", "", -52.70, 3.38, -56.08, 10053.58],
-    ["2026-10-27 13:54:20 IST", "GITHUB_ACTIONS", "HARVESTER", "BUY", "ZOMATO", 29, 326.79, 324.95, 332.70, "", "", "", 10053.58],
+    ["2026-10-27 10:10:24 IST", "GITHUB_ACTIONS", "HARVESTER", "BUY", "SBIN", 10, 963.11, 957.8, 980.5, "", "", "", 10109.66],
+    ["2026-10-27 11:42:25 IST", "GITHUB_ACTIONS", "HARVESTER", "SELL", "SBIN", 10, 957.84, "", "", -52.7, 3.38, -56.08, 10053.58],
+    ["2026-10-27 13:54:20 IST", "GITHUB_ACTIONS", "HARVESTER", "BUY", "ZOMATO", 29, 326.79, 324.95, 332.7, "", "", "", 10053.58],
     ["2026-10-27 14:40:03 IST", "GITHUB_ACTIONS", "HARVESTER", "SELL", "ZOMATO", 29, 328.11, "", "", 38.28, 3.35, 34.93, 10088.51],
-    ["2026-10-28 09:38:44 IST", "GITHUB_ACTIONS", "HARVESTER", "BUY", "ITC", 38, 254.24, 252.80, 258.85, "", "", "", 10088.51],
+    ["2026-10-28 09:38:44 IST", "GITHUB_ACTIONS", "HARVESTER", "BUY", "ITC", 38, 254.24, 252.8, 258.85, "", "", "", 10088.51],
     ["2026-10-28 09:51:25 IST", "GITHUB_ACTIONS", "HARVESTER", "SELL", "ITC", 38, 255.12, "", "", 33.44, 3.41, 30.03, 10118.54],
-    ["2026-10-28 09:52:14 IST", "GITHUB_ACTIONS", "HARVESTER", "BUY", "COALINDIA", 24, 396.05, 393.85, 403.20, "", "", "", 10118.54],
-    ["2026-10-28 10:06:58 IST", "GITHUB_ACTIONS", "HARVESTER", "SELL", "COALINDIA", 24, 393.90, "", "", -51.60, 3.34, -54.94, 10063.60],
-    ["2026-10-28 10:37:15 IST", "GITHUB_ACTIONS", "HARVESTER", "BUY", "SBIN", 10, 952.61, 947.35, 969.80, "", "", "", 10063.60],
-    ["2026-10-28 11:58:02 IST", "GITHUB_ACTIONS", "HARVESTER", "SELL", "SBIN", 10, 955.70, "", "", 30.90, 3.37, 27.53, 10091.13]
+    ["2026-10-28 09:52:14 IST", "GITHUB_ACTIONS", "HARVESTER", "BUY", "COALINDIA", 24, 396.05, 393.85, 403.2, "", "", "", 10118.54],
+    ["2026-10-28 10:06:58 IST", "GITHUB_ACTIONS", "HARVESTER", "SELL", "COALINDIA", 24, 393.9, "", "", -51.6, 3.34, -54.94, 10063.6],
+    ["2026-10-28 10:37:15 IST", "GITHUB_ACTIONS", "HARVESTER", "BUY", "SBIN", 10, 952.61, 947.35, 969.8, "", "", "", 10063.6],
+    ["2026-10-28 11:58:02 IST", "GITHUB_ACTIONS", "HARVESTER", "SELL", "SBIN", 10, 955.7, "", "", 30.9, 3.37, 27.53, 10091.13],
+    ["2026-10-29 13:31:52 IST", "GITHUB_ACTIONS", "HARVESTER", "BUY", "SBIN", 10, 963.71, 958.4, 981.1, "", "", "", 10091.13],
+    ["2026-10-29 14:25:17 IST", "GITHUB_ACTIONS", "HARVESTER", "SELL", "SBIN", 10, 967.74, "", "", 40.3, 3.41, 36.89, 10128.02],
+    ["2026-10-29 14:25:19 IST", "GITHUB_ACTIONS", "HARVESTER", "BUY", "HINDALCO", 11, 886.6, 881.7, 902.55, "", "", "", 10128.02],
+    ["2026-10-29 15:14:01 IST", "GITHUB_ACTIONS", "HARVESTER", "SELL", "HINDALCO", 11, 888.24, "", "", 18.04, 3.44, 14.6, 10142.62],
   ];
 
   var omniHistoricalRows = [
-    ["2026-10-26 09:37:11 IST", "GITHUB_ACTIONS", "OMNI", "BUY", "TATASTEEL", 124, 166.89, 165.40, 169.85, "", "", "", 10000.00],
-    ["2026-10-26 13:07:50 IST", "GITHUB_ACTIONS", "OMNI", "SELL", "TATASTEEL", 124, 167.18, "", "", 35.96, 7.30, 28.66, 10028.66],
-    ["2026-10-26 13:21:28 IST", "GITHUB_ACTIONS", "OMNI", "BUY", "SBIN", 22, 955.34, 947.15, 972.10, "", "", "", 10028.66],
-    ["2026-10-26 15:05:02 IST", "GITHUB_ACTIONS", "OMNI", "SELL", "SBIN", 22, 956.01, "", "", 14.74, 7.41, 7.33, 10035.98],
-    ["2026-10-27 09:50:02 IST", "GITHUB_ACTIONS", "OMNI", "BUY", "TATASTEEL", 120, 170.68, 169.15, 173.70, "", "", "", 10035.98],
-    ["2026-10-27 09:53:09 IST", "GITHUB_ACTIONS", "OMNI", "SHORT", "ITC", 82, 259.17, 261.40, 254.60, "", "", "", 10035.98],
-    ["2026-10-27 11:22:28 IST", "GITHUB_ACTIONS", "OMNI", "SELL", "TATASTEEL", 120, 170.87, "", "", 22.80, 7.23, 15.57, 10051.55],
-    ["2026-10-27 13:54:20 IST", "GITHUB_ACTIONS", "OMNI", "BUY", "ZOMATO", 64, 326.79, 323.95, 332.55, "", "", "", 10051.55],
-    ["2026-10-27 15:05:01 IST", "GITHUB_ACTIONS", "OMNI", "COVER", "ITC", 82, 256.68, "", "", 204.18, 7.48, 196.70, 10248.26],
-    ["2026-10-27 15:05:01 IST", "GITHUB_ACTIONS", "OMNI", "SELL", "ZOMATO", 64, 328.81, "", "", 129.28, 7.41, 121.87, 10370.13],
-    ["2026-10-28 09:38:44 IST", "GITHUB_ACTIONS", "OMNI", "BUY", "ITC", 84, 254.24, 252.00, 258.70, "", "", "", 10370.13],
-    ["2026-10-28 15:05:02 IST", "GITHUB_ACTIONS", "OMNI", "SELL", "ITC", 84, 258.02, "", "", 317.52, 7.62, 309.90, 10680.03]
+    ["2026-10-26 09:37:11 IST", "GITHUB_ACTIONS", "OMNI", "BUY", "TATASTEEL", 124, 166.89, 165.4, 169.85, "", "", "", 10000.0],
+    ["2026-10-26 13:07:50 IST", "GITHUB_ACTIONS", "OMNI", "SELL", "TATASTEEL", 124, 167.18, "", "", 35.96, 7.3, 28.66, 10028.66],
+    ["2026-10-26 13:21:28 IST", "GITHUB_ACTIONS", "OMNI", "BUY", "SBIN", 22, 955.34, 947.15, 972.1, "", "", "", 10028.66],
+    ["2026-10-26 15:14:03 IST", "GITHUB_ACTIONS", "OMNI", "SELL", "SBIN", 22, 957.05, "", "", 37.62, 7.42, 30.2, 10058.86],
+    ["2026-10-27 09:50:02 IST", "GITHUB_ACTIONS", "OMNI", "BUY", "TATASTEEL", 120, 170.68, 169.15, 173.7, "", "", "", 10058.86],
+    ["2026-10-27 09:53:09 IST", "GITHUB_ACTIONS", "OMNI", "SHORT", "ITC", 82, 259.17, 261.4, 254.6, "", "", "", 10058.86],
+    ["2026-10-27 11:22:28 IST", "GITHUB_ACTIONS", "OMNI", "SELL", "TATASTEEL", 120, 170.87, "", "", 22.8, 7.23, 15.57, 10074.43],
+    ["2026-10-27 13:54:20 IST", "GITHUB_ACTIONS", "OMNI", "BUY", "ZOMATO", 64, 326.79, 323.95, 332.55, "", "", "", 10074.43],
+    ["2026-10-27 15:14:02 IST", "GITHUB_ACTIONS", "OMNI", "COVER", "ITC", 82, 256.38, "", "", 228.78, 7.48, 221.3, 10295.74],
+    ["2026-10-27 15:14:02 IST", "GITHUB_ACTIONS", "OMNI", "SELL", "ZOMATO", 64, 330.46, "", "", 234.88, 7.44, 227.44, 10523.18],
+    ["2026-10-28 09:38:44 IST", "GITHUB_ACTIONS", "OMNI", "BUY", "ITC", 86, 254.24, 252.0, 258.7, "", "", "", 10523.18],
+    ["2026-10-28 15:14:01 IST", "GITHUB_ACTIONS", "OMNI", "SELL", "ITC", 86, 258.07, "", "", 329.38, 7.8, 321.58, 10844.76],
+    ["2026-10-29 11:04:22 IST", "GITHUB_ACTIONS", "OMNI", "BUY", "HINDALCO", 25, 889.6, 882.0, 905.2, "", "", "", 10844.76],
+    ["2026-10-29 11:55:47 IST", "GITHUB_ACTIONS", "OMNI", "SELL", "HINDALCO", 25, 881.9, "", "", -192.5, 7.78, -200.28, 10644.48],
+    ["2026-10-29 12:08:42 IST", "GITHUB_ACTIONS", "OMNI", "BUY", "SBIN", 23, 966.06, 957.8, 983.05, "", "", "", 10644.48],
+    ["2026-10-29 15:14:01 IST", "GITHUB_ACTIONS", "OMNI", "SELL", "SBIN", 23, 969.4, "", "", 76.82, 7.85, 68.97, 10713.44],
   ];
 
-  // 1. Reconcile Live_Trades (replace HARVESTER and OMNI historical rows with v3.1.0 replay, merge & sort chronologically)
+  // 1. Reconcile Live_Trades (merge all 4 days chronologically across all 3 tracks)
   var tradesSheet = ss.getSheetByName("Live_Trades");
   if (tradesSheet && tradesSheet.getLastRow() > 1) {
     var data = tradesSheet.getDataRange().getValues();
     var header = data[0];
-    var compRows = [];
-    for (var i = 1; i < data.length; i++) {
-      var tsStr = String(data[i][0]).trim();
-      var trkName = String(data[i][2]).trim().toUpperCase();
-      var isOct26To28 = (tsStr.indexOf("2026-10-26") === 0 || tsStr.indexOf("2026-10-27") === 0 || tsStr.indexOf("2026-10-28") === 0);
-      if (trkName === "COMPOUNDER" || !isOct26To28) {
-        compRows.push(data[i]);
-      }
-    }
-    var merged = compRows.concat(harvHistoricalRows).concat(omniHistoricalRows);
+    var merged = compHistoricalRows.concat(harvHistoricalRows).concat(omniHistoricalRows);
     merged.sort(function(a, b) {
       var ta = String(a[0]).trim();
       var tb = String(b[0]).trim();
       return ta < tb ? -1 : (ta > tb ? 1 : 0);
     });
 
-    var compBalance = 10000.0;
-    var harvBalance = 10000.0;
-    var omniBalance = 10000.0;
-
-    for (var r = 0; r < merged.length; r++) {
-      var trk = String(merged[r][2]).trim().toUpperCase();
-      var side = String(merged[r][3]).trim().toUpperCase();
-      var netPnl = parseFloat(String(merged[r][11]).trim()) || 0.0;
-
-      if (side === "BUY" || side === "SHORT") {
-        if (trk === "COMPOUNDER") merged[r][12] = Math.round(compBalance * 100) / 100;
-        else if (trk === "HARVESTER") merged[r][12] = Math.round(harvBalance * 100) / 100;
-        else if (trk === "OMNI") merged[r][12] = Math.round(omniBalance * 100) / 100;
-      } else if (side === "SELL" || side === "COVER") {
-        if (trk === "COMPOUNDER") {
-          compBalance += netPnl;
-          merged[r][12] = Math.round(compBalance * 100) / 100;
-        } else if (trk === "HARVESTER") {
-          harvBalance += netPnl;
-          merged[r][12] = Math.round(harvBalance * 100) / 100;
-        } else if (trk === "OMNI") {
-          omniBalance += netPnl;
-          merged[r][12] = Math.round(omniBalance * 100) / 100;
-        }
-      }
-    }
-
     var allTrades = [header].concat(merged);
     tradesSheet.clearContents();
     tradesSheet.getRange(1, 1, allTrades.length, header.length).setValues(allTrades);
   }
 
-  // 2. Reconcile Daily_Summary with true v3.1.0 3-Track cumulative equity numbers
+  // 2. Reconcile Daily_Summary with true 4-Day cumulative equity numbers (15:14 IST cutoff)
   var summarySheet = ss.getSheetByName("Daily_Summary");
   if (summarySheet) {
     var headers = [
@@ -441,9 +432,10 @@ function reconcileMultiDayBalances() {
     ];
     var reconciledRows = [
       headers,
-      ["2026-10-26", "GITHUB_ACTIONS", "ANGELONE", 60255, 10155.12, 155.12, 1.55, 2, 50.0, 10069.78, 69.78, 0.70, 2, 100.0, 10035.98,  35.98, 0.36, 2, 100.0],
-      ["2026-10-27", "GITHUB_ACTIONS", "UPSTOX",   78205, 10107.49, -47.63, -0.47, 2, 50.0, 10088.51, 18.73, 0.19, 3,  66.7, 10370.13, 334.15, 3.33, 3, 100.0],
-      ["2026-10-28", "GITHUB_ACTIONS", "UPSTOX",   79460, 10148.51,  41.02,  0.41, 2, 100.0, 10091.13,  2.62, 0.03, 3,  66.7, 10680.03, 309.90, 2.99, 1, 100.0]
+      ["2026-10-26", "GITHUB_ACTIONS", "ANGELONE", 60255, 9987.45, -12.55, -0.13, 2, 50.0, 10069.78, 69.78, 0.7, 2, 100.0, 10058.86, 58.86, 0.59, 2, 100.0],
+      ["2026-10-27", "GITHUB_ACTIONS", "UPSTOX", 78205, 9987.49, 0.04, 0.0, 2, 50.0, 10088.51, 18.73, 0.19, 3, 66.7, 10523.18, 464.31, 4.62, 3, 100.0],
+      ["2026-10-28", "GITHUB_ACTIONS", "UPSTOX", 79460, 10024.99, 37.51, 0.38, 2, 100.0, 10091.13, 2.62, 0.03, 3, 66.7, 10844.76, 321.58, 3.06, 1, 100.0],
+      ["2026-10-29", "GITHUB_ACTIONS", "ANGELONE", 133936, 10106.49, 81.5, 0.81, 2, 100.0, 10142.62, 51.49, 0.51, 2, 100.0, 10713.44, -131.31, -1.21, 2, 50.0],
     ];
     summarySheet.clear();
     summarySheet.getRange(1, 1, reconciledRows.length, 19).setValues(reconciledRows);
@@ -458,10 +450,10 @@ function reconcileMultiDayBalances() {
     dashSheet.getRange(5, 1, 1, 4).setValues([["STRATEGY TRACK COMPARISON (LIVE)", "Track A: High-Yield Compounder", "Track B: L2 Microstructure Harvester", "Track C: Bi-Directional Omni (Long+Short)"]])
       .setFontWeight("bold").setBackground("#283593").setFontColor("#ffffff");
     dashSheet.getRange(6, 2, 5, 3).setValues([
-      [10148.51, 10091.13, 10680.03],
-      [148.51, 91.13, 680.03],
-      ["+1.49%", "+0.91%", "+6.80%"],
-      ["4W / 6T (2W/2T Today)", "6W / 8T (2W/3T Today)", "6W / 6T (1W/1T Today)"],
+      [10106.49, 10142.62, 10713.44],
+      [106.49, 142.62, 713.44],
+      ["+1.06%", "+1.43%", "+7.13%"],
+      ["6W / 8T (2W/2T Today)", "8W / 10T (2W/2T Today)", "7W / 8T (1W/2T Today)"],
       ["FLAT", "FLAT", "FLAT"]
     ]);
   }
