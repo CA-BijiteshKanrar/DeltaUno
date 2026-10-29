@@ -31,20 +31,32 @@ function onOpen() {
  * Triggers GitHub Actions workflow_dispatch (bypasses GitHub cron queue delays).
  * Uses GITHUB_PAT stored in ScriptProperties.
  */
-function triggerGitHubWorkflow() {
+function triggerGitHubWorkflow(startNowOverride) {
   var props = PropertiesService.getScriptProperties();
   var token = props.getProperty("GITHUB_PAT");
   if (!token) {
-    var ui = SpreadsheetApp.getUi();
-    var res = ui.prompt("GitHub Token Setup", "Enter your GitHub Personal Access Token (stored privately in ScriptProperties):", ui.ButtonSet.OK_CANCEL);
-    if (res.getSelectedButton() !== ui.Button.OK || !res.getResponseText().trim()) return;
-    token = res.getResponseText().trim();
-    props.setProperty("GITHUB_PAT", token);
+    try {
+      var ui = SpreadsheetApp.getUi();
+      var res = ui.prompt("GitHub Token Setup", "Enter your GitHub Personal Access Token (stored privately in ScriptProperties):", ui.ButtonSet.OK_CANCEL);
+      if (res.getSelectedButton() !== ui.Button.OK || !res.getResponseText().trim()) return;
+      token = res.getResponseText().trim();
+      props.setProperty("GITHUB_PAT", token);
+    } catch (e) {
+      Logger.log("Missing GITHUB_PAT in ScriptProperties.");
+      return;
+    }
   }
+  var nowIstStr = Utilities.formatDate(new Date(), "Asia/Kolkata", "HH:mm");
+  var parts = nowIstStr.split(":");
+  var hr = parseInt(parts[0], 10);
+  var mn = parseInt(parts[1], 10);
+  var isAfterOpen = (hr > 9) || (hr === 9 && mn >= 15);
+  var startNowStr = (startNowOverride !== undefined) ? String(startNowOverride) : (isAfterOpen ? "true" : "false");
+
   var url = "https://api.github.com/repos/CA-BijiteshKanrar/DeltaUno/actions/workflows/live_paper_trading.yml/dispatches";
   var payload = {
     ref: "main",
-    inputs: { mode: "both", provider: "auto", start_now: "true", max_runtime_minutes: "350" }
+    inputs: { mode: "both", provider: "auto", start_now: startNowStr, max_runtime_minutes: "350" }
   };
   var resp = UrlFetchApp.fetch(url, {
     method: "post",
@@ -57,38 +69,78 @@ function triggerGitHubWorkflow() {
     payload: JSON.stringify(payload),
     muteHttpExceptions: true
   });
+  Logger.log("Dispatched GitHub Actions workflow: HTTP " + resp.getResponseCode());
   try {
     SpreadsheetApp.getActiveSpreadsheet().toast("GitHub Actions bot launched (HTTP " + resp.getResponseCode() + ")", "🚀 DeltaUno AI", 5);
   } catch (e) {}
 }
 
 /**
- * Daily 09:05 AM IST Cloud Trigger handler (Mon-Fri only).
+ * Daily 09:05 AM IST Cloud Trigger handler (Mon-Fri only, 100% independent of desktop).
  */
 function autoMorningGitHubDispatch() {
   var now = new Date();
-  var day = now.getDay(); // 0=Sun, 6=Sat
-  if (day === 0 || day === 6) return;
+  var dayStr = Utilities.formatDate(now, "Asia/Kolkata", "u"); // 1=Mon .. 7=Sun
+  var dayNum = parseInt(dayStr, 10);
+  if (dayNum >= 6) {
+    Logger.log("Weekend in IST (day=" + dayNum + "); skipping dispatch.");
+    return;
+  }
   var props = PropertiesService.getScriptProperties();
   var token = props.getProperty("GITHUB_PAT");
-  if (!token) return;
-  var runsResp = UrlFetchApp.fetch("https://api.github.com/repos/CA-BijiteshKanrar/DeltaUno/actions/runs?per_page=5", {
-    headers: { "User-Agent": "DeltaUno-Sheets-CloudTrigger" },
+  if (!token) {
+    Logger.log("GITHUB_PAT not configured in ScriptProperties.");
+    return;
+  }
+  var todayUtc = Utilities.formatDate(now, "GMT", "yyyy-MM-dd");
+  var todayIst = Utilities.formatDate(now, "Asia/Kolkata", "yyyy-MM-dd");
+
+  var runsResp = UrlFetchApp.fetch("https://api.github.com/repos/CA-BijiteshKanrar/DeltaUno/actions/workflows/live_paper_trading.yml/runs?per_page=8", {
+    headers: {
+      "Authorization": "Bearer " + token,
+      "Accept": "application/vnd.github+json",
+      "User-Agent": "DeltaUno-Sheets-CloudTrigger"
+    },
     muteHttpExceptions: true
   });
   if (runsResp.getResponseCode() === 200) {
     var runs = JSON.parse(runsResp.getContentText()).workflow_runs || [];
     for (var i = 0; i < runs.length; i++) {
-      if (runs[i].status === "in_progress" || runs[i].status === "queued") return;
+      var st = runs[i].status || "";
+      var ca = runs[i].created_at || "";
+      if (st === "in_progress" || st === "queued" || st === "waiting" || st === "requested") {
+        Logger.log("Active run already " + st + " (ID=" + runs[i].id + "); skipping.");
+        return;
+      }
+      if ((ca.indexOf(todayUtc) === 0 || ca.indexOf(todayIst) === 0) && runs[i].conclusion === "success") {
+        Logger.log("Today's run already completed with success (ID=" + runs[i].id + "); skipping.");
+        return;
+      }
     }
   }
   triggerGitHubWorkflow();
 }
 
+/**
+ * 10-minute Morning Watchdog (runs only between 09:00 and 10:15 AM IST Mon-Fri).
+ * Guarantees session launch even if the primary 09:05 AM trigger hits a transient GitHub 5xx.
+ */
+function cloudMorningWatchdog() {
+  var now = new Date();
+  var dayNum = parseInt(Utilities.formatDate(now, "Asia/Kolkata", "u"), 10); // 1=Mon .. 7=Sun
+  if (dayNum >= 6) return;
+  var hr = parseInt(Utilities.formatDate(now, "Asia/Kolkata", "HH"), 10);
+  var mn = parseInt(Utilities.formatDate(now, "Asia/Kolkata", "mm"), 10);
+  if (hr === 9 || (hr === 10 && mn <= 15)) {
+    autoMorningGitHubDispatch();
+  }
+}
+
 function installMorningAutoTrigger() {
   var triggers = ScriptApp.getProjectTriggers();
   for (var i = 0; i < triggers.length; i++) {
-    if (triggers[i].getHandlerFunction() === "autoMorningGitHubDispatch") {
+    var fn = triggers[i].getHandlerFunction();
+    if (fn === "autoMorningGitHubDispatch" || fn === "cloudMorningWatchdog") {
       ScriptApp.deleteTrigger(triggers[i]);
     }
   }
@@ -99,7 +151,14 @@ function installMorningAutoTrigger() {
     .nearMinute(5)
     .inTimezone("Asia/Kolkata")
     .create();
-  SpreadsheetApp.getActiveSpreadsheet().toast("Daily 09:05 AM IST Cloud Auto-Launcher enabled!", "⏰ DeltaUno AI", 5);
+  ScriptApp.newTrigger("cloudMorningWatchdog")
+    .timeBased()
+    .everyMinutes(10)
+    .create();
+  Logger.log("Installed 09:05 AM IST daily trigger + 10-min morning cloud watchdog.");
+  try {
+    SpreadsheetApp.getActiveSpreadsheet().toast("Daily 09:05 AM IST Cloud Auto-Launcher + 10m Watchdog enabled!", "⏰ DeltaUno AI", 5);
+  } catch (e) {}
 }
 
 function ensureSheet_(ss, name, headers) {
@@ -261,6 +320,11 @@ function doPost(e) {
       reconcileMultiDayBalances();
     }
 
+    // 6. Store GitHub PAT securely in ScriptProperties for 100% cloud-native 09:05 AM IST trigger
+    if (eventType === "SET_GITHUB_PAT" && payload.token) {
+      PropertiesService.getScriptProperties().setProperty("GITHUB_PAT", String(payload.token).trim());
+    }
+
     return ContentService.createTextOutput(JSON.stringify({ status: "ok", event: eventType }))
                          .setMimeType(ContentService.MimeType.JSON);
   } catch (err) {
@@ -320,8 +384,10 @@ function reconcileMultiDayBalances() {
     var header = data[0];
     var compRows = [];
     for (var i = 1; i < data.length; i++) {
+      var tsStr = String(data[i][0]).trim();
       var trkName = String(data[i][2]).trim().toUpperCase();
-      if (trkName === "COMPOUNDER") {
+      var isOct26To28 = (tsStr.indexOf("2026-10-26") === 0 || tsStr.indexOf("2026-10-27") === 0 || tsStr.indexOf("2026-10-28") === 0);
+      if (trkName === "COMPOUNDER" || !isOct26To28) {
         compRows.push(data[i]);
       }
     }
