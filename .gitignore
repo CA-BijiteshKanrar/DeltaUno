@@ -12,4 +12,7 @@ tradeuno_state.json
 test_state*.json
 data/circuit_ticks.csv
 data/live_*.csv
+live_ticks*.csv
+live_artifacts.zip
+live_run_logs/
 config/live_broker.env
