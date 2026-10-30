@@ -360,6 +360,10 @@ function reconcileMultiDayBalances() {
     ["2026-10-29 13:38:17 IST", "GITHUB_ACTIONS", "COMPOUNDER", "SELL", "TRENT", 3, 2868.1, "", "", 11.04, 3.03, 8.01, 10033.0],
     ["2026-10-29 13:39:05 IST", "GITHUB_ACTIONS", "COMPOUNDER", "BUY", "TATAMOTORS", 37, 264.49, 262.2, 269.15, "", "", "", 10033.0],
     ["2026-10-29 15:14:01 IST", "GITHUB_ACTIONS", "COMPOUNDER", "SELL", "TATAMOTORS", 37, 266.57, "", "", 76.96, 3.47, 73.49, 10106.49],
+    ["2026-10-30 09:35:03 IST", "GITHUB_ACTIONS", "COMPOUNDER", "BUY", "HINDALCO", 11, 881.36, 873.85, 896.85, "", "", "", 10106.49],
+    ["2026-10-30 13:59:16 IST", "GITHUB_ACTIONS", "COMPOUNDER", "SELL", "HINDALCO", 11, 882.46, "", "", 12.1, 3.42, 8.68, 10115.17],
+    ["2026-10-30 13:59:30 IST", "GITHUB_ACTIONS", "COMPOUNDER", "BUY", "BEL", 26, 368.36, 365.2, 374.85, "", "", "", 10115.17],
+    ["2026-10-30 15:14:01 IST", "GITHUB_ACTIONS", "COMPOUNDER", "SELL", "BEL", 26, 367.46, "", "", -23.4, 3.37, -26.77, 10088.40],
   ];
 
   var harvHistoricalRows = [
@@ -383,6 +387,12 @@ function reconcileMultiDayBalances() {
     ["2026-10-29 14:25:17 IST", "GITHUB_ACTIONS", "HARVESTER", "SELL", "SBIN", 10, 967.74, "", "", 40.3, 3.41, 36.89, 10128.02],
     ["2026-10-29 14:25:19 IST", "GITHUB_ACTIONS", "HARVESTER", "BUY", "HINDALCO", 11, 886.6, 881.7, 902.55, "", "", "", 10128.02],
     ["2026-10-29 15:14:01 IST", "GITHUB_ACTIONS", "HARVESTER", "SELL", "HINDALCO", 11, 888.24, "", "", 18.04, 3.44, 14.6, 10142.62],
+    ["2026-10-30 09:35:03 IST", "GITHUB_ACTIONS", "HARVESTER", "BUY", "HINDALCO", 11, 881.36, 876.5, 897.3, "", "", "", 10142.62],
+    ["2026-10-30 10:09:39 IST", "GITHUB_ACTIONS", "HARVESTER", "SELL", "HINDALCO", 11, 876.19, "", "", -56.87, 3.4, -60.27, 10082.35],
+    ["2026-10-30 10:10:13 IST", "GITHUB_ACTIONS", "HARVESTER", "BUY", "TRENT", 3, 3036.57, 3019.85, 3091.25, "", "", "", 10082.35],
+    ["2026-10-30 11:38:09 IST", "GITHUB_ACTIONS", "HARVESTER", "SELL", "TRENT", 3, 3049.09, "", "", 37.56, 3.22, 34.34, 10116.69],
+    ["2026-10-30 13:30:06 IST", "GITHUB_ACTIONS", "HARVESTER", "BUY", "BEL", 26, 369.18, 367.1, 375.85, "", "", "", 10116.69],
+    ["2026-10-30 15:14:01 IST", "GITHUB_ACTIONS", "HARVESTER", "SELL", "BEL", 26, 367.46, "", "", -44.72, 3.37, -48.09, 10068.60],
   ];
 
   var omniHistoricalRows = [
@@ -402,6 +412,12 @@ function reconcileMultiDayBalances() {
     ["2026-10-29 11:55:47 IST", "GITHUB_ACTIONS", "OMNI", "SELL", "HINDALCO", 25, 881.9, "", "", -192.5, 7.78, -200.28, 10644.48],
     ["2026-10-29 12:08:42 IST", "GITHUB_ACTIONS", "OMNI", "BUY", "SBIN", 23, 966.06, 957.8, 983.05, "", "", "", 10644.48],
     ["2026-10-29 15:14:01 IST", "GITHUB_ACTIONS", "OMNI", "SELL", "SBIN", 23, 969.4, "", "", 76.82, 7.85, 68.97, 10713.44],
+    ["2026-10-30 09:35:03 IST", "GITHUB_ACTIONS", "OMNI", "BUY", "HINDALCO", 25, 881.38, 873.85, 896.85, "", "", "", 10713.44],
+    ["2026-10-30 10:00:12 IST", "GITHUB_ACTIONS", "OMNI", "SHORT", "SBIN", 23, 964.84, 973.05, 947.9, "", "", "", 10713.44],
+    ["2026-10-30 13:59:16 IST", "GITHUB_ACTIONS", "OMNI", "SELL", "HINDALCO", 25, 882.45, "", "", 26.75, 7.77, 18.98, 10732.42],
+    ["2026-10-30 13:59:30 IST", "GITHUB_ACTIONS", "OMNI", "BUY", "BEL", 61, 368.39, 365.2, 374.85, "", "", "", 10732.42],
+    ["2026-10-30 15:14:01 IST", "GITHUB_ACTIONS", "OMNI", "SELL", "BEL", 61, 367.46, "", "", -56.73, 7.9, -64.63, 10667.78],
+    ["2026-10-30 15:14:01 IST", "GITHUB_ACTIONS", "OMNI", "COVER", "SBIN", 23, 961.4, "", "", 79.12, 7.82, 71.30, 10739.09],
   ];
 
   // 1. Reconcile Live_Trades (merge all 4 days chronologically across all 3 tracks)
@@ -436,6 +452,7 @@ function reconcileMultiDayBalances() {
       ["2026-10-27", "GITHUB_ACTIONS", "UPSTOX", 78205, 9987.49, 0.04, 0.0, 2, 50.0, 10088.51, 18.73, 0.19, 3, 66.7, 10523.18, 464.31, 4.62, 3, 100.0],
       ["2026-10-28", "GITHUB_ACTIONS", "UPSTOX", 79460, 10024.99, 37.51, 0.38, 2, 100.0, 10091.13, 2.62, 0.03, 3, 66.7, 10844.76, 321.58, 3.06, 1, 100.0],
       ["2026-10-29", "GITHUB_ACTIONS", "ANGELONE", 133936, 10106.49, 81.5, 0.81, 2, 100.0, 10142.62, 51.49, 0.51, 2, 100.0, 10713.44, -131.31, -1.21, 2, 50.0],
+      ["2026-10-30", "GITHUB_ACTIONS", "ANGELONE", 183044, 10088.40, -18.09, -0.18, 2, 50.0, 10068.60, -74.02, -0.73, 3, 33.3, 10739.09, 25.65, 0.24, 3, 66.7],
     ];
     summarySheet.clear();
     summarySheet.getRange(1, 1, reconciledRows.length, 19).setValues(reconciledRows);
@@ -450,10 +467,10 @@ function reconcileMultiDayBalances() {
     dashSheet.getRange(5, 1, 1, 4).setValues([["STRATEGY TRACK COMPARISON (LIVE)", "Track A: High-Yield Compounder", "Track B: L2 Microstructure Harvester", "Track C: Bi-Directional Omni (Long+Short)"]])
       .setFontWeight("bold").setBackground("#283593").setFontColor("#ffffff");
     dashSheet.getRange(6, 2, 5, 3).setValues([
-      [10106.49, 10142.62, 10713.44],
-      [106.49, 142.62, 713.44],
-      ["+1.06%", "+1.43%", "+7.13%"],
-      ["6W / 8T (2W/2T Today)", "8W / 10T (2W/2T Today)", "7W / 8T (1W/2T Today)"],
+      [10088.40, 10068.60, 10739.09],
+      [88.40, 68.60, 739.09],
+      ["+0.88%", "+0.69%", "+7.39%"],
+      ["7W / 10T (1W/2T Today)", "9W / 13T (1W/3T Today)", "9W / 11T (2W/3T Today)"],
       ["FLAT", "FLAT", "FLAT"]
     ]);
   }
