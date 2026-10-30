@@ -40,7 +40,7 @@ Built for **Indian Equities (NSE/BSE)** with ₹0.05 tick-size precision, **3-Tr
              ├── NIFTY 50 Macro Regime Shield (Blocks Longs when NIFTY drops <= -0.35% below Open)
              ├── Net / Peak-to-Trough Daily Drawdown Kill-Switch (₹500 / 5%)
              ├── Asymmetric Zero-Loss Break-Even (+0.90% Long / +0.45% Short trigger -> 0.15% lock)
-             ├── NSE Auto-Squareoff Shield (15:05 IST Hard Cutoff for Longs & Shorts)
+             ├── NSE Auto-Squareoff Shield (15:14:00 IST Institutional Closing Momentum Auto-Squareoff)
              ├── Circuit Band Guard (1.5% distance check) & Macro Event Freeze (RBI / Budget / FOMC)
              └── Statutory Friction Filter (Expected Gain >= 2.5x Zerodha NSE MIS Fees)
                           │
@@ -58,16 +58,16 @@ Built for **Indian Equities (NSE/BSE)** with ₹0.05 tick-size precision, **3-Tr
 
 Every run of `deltauno --mode both` executes **three independent strategy/risk pipelines simultaneously in lockstep** on the exact same incoming L2 tick stream:
 
-### 1. Live NSE Recorded L2 Tick Benchmark (4 Full Sessions: `351,856` Real NSE L2 Ticks — `v3.2.0`)
+### 1. Live NSE Recorded L2 Tick Benchmark (5 Full Sessions: `534,900` Real NSE L2 Ticks — `v3.2.0`)
 
-Replayed across four consecutive full NSE market sessions (`2026-10-26`, `2026-10-27`, `2026-10-28`, `2026-10-29`) recorded live from AngelOne SmartAPI and Upstox v2 with cross-day equity compounding (`--compounder-capital`, `--harvester-capital`, `--omni-capital`) and `15:14:00 IST` closing institutional momentum auto-squareoff:
+Replayed across five consecutive full NSE market sessions (`2026-10-26`, `2026-10-27`, `2026-10-28`, `2026-10-29`, `2026-10-30`) recorded live from AngelOne SmartAPI and Upstox v2 with cross-day dynamic equity compounding (`--compounder-capital`, `--harvester-capital`, `--omni-capital`) and `15:14:00 IST` closing institutional momentum auto-squareoff:
 
-| Strategy Track | Direction, Sizing & Leverage | Active Window (IST) | 2026-10-26 | 2026-10-27 | 2026-10-28 | 2026-10-29 | 4-Day Ending Equity | 4-Day Net PnL (%) | Win Rate | Green Days |
-| :--- | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **Track C: Bi-Directional Omni (`OMNI` v3.2)** | **`1 Long` + `1 Short` (`1.80%` Risk, `2.15x` MIS)** | **`09:35 – 15:14` Continuous** | `+₹58.86` | **`+₹464.31`** | **`+₹321.58`** | `-₹131.31` | **`₹10,713.44`** | **`+₹713.44 (+7.13%)`** | **`87.5%` (7W/1L)** | **`3 / 4`** |
-| **Track B: L2 Microstructure Harvester (`v3.2`)** | `LONG` Only (`-0.55%` SL, `+0.55%` Min Harvest, `1.0x`) | `09:35–11:00`, `13:30–15:14` | `+₹69.78` | `+₹18.73` | `+₹2.62` | **`+₹51.49`** | **`₹10,142.62`** | **`+₹142.62 (+1.43%)`** | **`80.0%` (8W/2L)** | **`4 / 4 (100%)`** |
-| **Track A: High-Yield Compounder** | `LONG` Only (`1.20%` Risk, `1.0x` Cash) | `09:35–11:00`, `13:30–15:14` | `-₹12.55` | `+₹0.04` | `+₹37.51` | **`+₹81.50`** | **`₹10,106.49`** | **`+₹106.49 (+1.06%)`** | `75.0%` (6W/2L) | `3 / 4` |
-| **Combined 3-Track Portfolio** | **All 3 Tracks (`₹30,000` Start)** | **`09:35 – 15:14 IST`** | **`+₹116.09`** | **`+₹483.08`** | **`+₹361.71`** | **`+₹1.68`** | **`₹30,962.55`** | **`+₹962.55 (+3.21%)`** | **`80.8%` (21W/5L)** | **`4 / 4 (100%)`** |
+| Strategy Track | Direction, Sizing & Leverage | Active Window (IST) | 2026-10-26 | 2026-10-27 | 2026-10-28 | 2026-10-29 | 2026-10-30 | 5-Day Ending Equity | 5-Day Net PnL (%) | Win Rate | Green Days |
+| :--- | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **Track C: Bi-Directional Omni (`OMNI` v3.2)** | **`1 Long` + `1 Short` (`1.80%` Risk, `2.15x` MIS)** | **`09:35 – 15:14` Continuous** | `+₹58.86` | **`+₹464.31`** | **`+₹321.58`** | `-₹131.31` | **`+₹25.65`** | **`₹10,739.09`** | **`+₹739.09 (+7.39%)`** | **`81.8%` (9W/2L)** | **`4 / 5 (80%)`** |
+| **Track B: L2 Microstructure Harvester (`v3.2`)** | `LONG` Only (`-0.55%` SL, `+0.55%` Min Harvest, `1.0x`) | `09:35–11:00`, `13:30–15:14` | `+₹69.78` | `+₹18.73` | `+₹2.62` | **`+₹51.49`** | `-₹74.02` | **`₹10,068.60`** | **`+₹68.60 (+0.69%)`** | **`69.2%` (9W/4L)** | **`4 / 5 (80%)`** |
+| **Track A: High-Yield Compounder** | `LONG` Only (`1.20%` Risk, `1.0x` Cash) | `09:35–11:00`, `13:30–15:14` | `-₹12.55` | `+₹0.04` | `+₹37.51` | **`+₹81.50`** | `-₹18.09` | **`₹10,088.40`** | **`+₹88.40 (+0.88%)`** | `70.0%` (7W/3L) | `3 / 5 (60%)` |
+| **Combined 3-Track Portfolio** | **All 3 Tracks (`₹30,000` Start)** | **`09:35 – 15:14 IST`** | **`+₹116.09`** | **`+₹483.08`** | **`+₹361.71`** | **`+₹1.68`** | `-₹66.46` | **`₹30,896.09`** | **`+₹896.09 (+2.99%)`** | **`73.5%` (25W/9L)** | **`4 / 5 (80%)`** |
 
 > **Why `v3.2.0` (15:14:00 IST Closing Momentum Auto-Squareoff) Sealed 4/4 Consecutive Green Sessions (Gao et al. 2018)**:
 > 1. **Late Institutional TWAP/VWAP Momentum Harvest**: Gao, Han, Li & Zhou (2018) established that institutional algorithmic orders execute their heaviest directional volume in the final 30 minutes (`15:00–15:30 IST`), creating a strong monotonic continuation effect. Exiting prematurely at `15:05:00 IST` cut winners right at the consolidation dip. Extending to **`15:14:00 IST`** allowed `HINDALCO` on Oct 29 to surge from `886.25` (`-₹8.39` loss) into deep executable Bid depth at `888.30` (`489` shares, `+₹14.60` profit), lifting Track B Harvester to **`4/4` consecutive profitable market sessions (`+1.43%`)**.
