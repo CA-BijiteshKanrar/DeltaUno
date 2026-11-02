@@ -56,7 +56,7 @@ function triggerGitHubWorkflow(startNowOverride) {
   var url = "https://api.github.com/repos/CA-BijiteshKanrar/DeltaUno/actions/workflows/live_paper_trading.yml/dispatches";
   var payload = {
     ref: "main",
-    inputs: { mode: "both", provider: "auto", start_now: startNowStr, max_runtime_minutes: "350" }
+    inputs: { mode: "both", provider: "auto", start_now: startNowStr, max_runtime_minutes: "355" }
   };
   var resp = UrlFetchApp.fetch(url, {
     method: "post",
@@ -122,8 +122,8 @@ function autoMorningGitHubDispatch() {
 }
 
 /**
- * 10-minute Morning Watchdog (runs only between 09:00 and 10:15 AM IST Mon-Fri).
- * Guarantees session launch even if the primary 09:05 AM trigger hits a transient GitHub 5xx.
+ * 10-minute Morning Watchdog (runs only between 09:16 and 10:15 AM IST Mon-Fri).
+ * Guarantees session launch after 09:16 IST so the 360-minute GitHub runner window covers 15:14:00 IST auto-squareoff.
  */
 function cloudMorningWatchdog() {
   var now = new Date();
@@ -131,7 +131,7 @@ function cloudMorningWatchdog() {
   if (dayNum >= 6) return;
   var hr = parseInt(Utilities.formatDate(now, "Asia/Kolkata", "HH"), 10);
   var mn = parseInt(Utilities.formatDate(now, "Asia/Kolkata", "mm"), 10);
-  if (hr === 9 || (hr === 10 && mn <= 15)) {
+  if ((hr === 9 && mn >= 16) || (hr === 10 && mn <= 15)) {
     autoMorningGitHubDispatch();
   }
 }
@@ -148,16 +148,16 @@ function installMorningAutoTrigger() {
     .timeBased()
     .everyDays(1)
     .atHour(9)
-    .nearMinute(5)
+    .nearMinute(16)
     .inTimezone("Asia/Kolkata")
     .create();
   ScriptApp.newTrigger("cloudMorningWatchdog")
     .timeBased()
     .everyMinutes(10)
     .create();
-  Logger.log("Installed 09:05 AM IST daily trigger + 10-min morning cloud watchdog.");
+  Logger.log("Installed 09:16 AM IST daily trigger + 10-min morning cloud watchdog.");
   try {
-    SpreadsheetApp.getActiveSpreadsheet().toast("Daily 09:05 AM IST Cloud Auto-Launcher + 10m Watchdog enabled!", "⏰ DeltaUno AI", 5);
+    SpreadsheetApp.getActiveSpreadsheet().toast("Daily 09:16 AM IST Cloud Auto-Launcher + 10m Watchdog enabled!", "⏰ DeltaUno AI", 5);
   } catch (e) {}
 }
 
@@ -364,6 +364,10 @@ function reconcileMultiDayBalances() {
     ["2026-10-30 13:59:16 IST", "GITHUB_ACTIONS", "COMPOUNDER", "SELL", "HINDALCO", 11, 882.46, "", "", 12.1, 3.42, 8.68, 10115.17],
     ["2026-10-30 13:59:30 IST", "GITHUB_ACTIONS", "COMPOUNDER", "BUY", "BEL", 26, 368.36, 365.2, 374.85, "", "", "", 10115.17],
     ["2026-10-30 15:14:01 IST", "GITHUB_ACTIONS", "COMPOUNDER", "SELL", "BEL", 26, 367.46, "", "", -23.4, 3.37, -26.77, 10088.40],
+    ["2026-11-02 09:35:02 IST", "GITHUB_ACTIONS", "COMPOUNDER", "BUY", "BEL", 26, 375.0, 371.8, 381.6, "", "", "", 10088.4],
+    ["2026-11-02 09:51:12 IST", "GITHUB_ACTIONS", "COMPOUNDER", "SELL", "BEL", 26, 375.56, "", "", 14.56, 3.44, 11.12, 10099.52],
+    ["2026-11-02 09:51:27 IST", "GITHUB_ACTIONS", "COMPOUNDER", "BUY", "HINDALCO", 11, 898.08, 890.4, 913.8, "", "", "", 10099.52],
+    ["2026-11-02 15:14:01 IST", "GITHUB_ACTIONS", "COMPOUNDER", "SELL", "HINDALCO", 11, 907.75, "", "", 106.37, 3.51, 102.86, 10202.38],
   ];
 
   var harvHistoricalRows = [
@@ -393,6 +397,10 @@ function reconcileMultiDayBalances() {
     ["2026-10-30 11:38:09 IST", "GITHUB_ACTIONS", "HARVESTER", "SELL", "TRENT", 3, 3049.09, "", "", 37.56, 3.22, 34.34, 10116.69],
     ["2026-10-30 13:30:06 IST", "GITHUB_ACTIONS", "HARVESTER", "BUY", "BEL", 26, 369.18, 367.1, 375.85, "", "", "", 10116.69],
     ["2026-10-30 15:14:01 IST", "GITHUB_ACTIONS", "HARVESTER", "SELL", "BEL", 26, 367.46, "", "", -44.72, 3.37, -48.09, 10068.60],
+    ["2026-11-02 09:35:02 IST", "GITHUB_ACTIONS", "HARVESTER", "BUY", "BEL", 26, 375.0, 372.9, 381.75, "", "", "", 10068.6],
+    ["2026-11-02 09:41:19 IST", "GITHUB_ACTIONS", "HARVESTER", "SELL", "BEL", 26, 376.41, "", "", 36.66, 3.45, 33.21, 10101.81],
+    ["2026-11-02 09:42:43 IST", "GITHUB_ACTIONS", "HARVESTER", "BUY", "TATASTEEL", 56, 174.62, 173.6, 177.8, "", "", "", 10101.81],
+    ["2026-11-02 10:37:45 IST", "GITHUB_ACTIONS", "HARVESTER", "SELL", "TATASTEEL", 56, 175.33, "", "", 39.76, 3.46, 36.3, 10138.12],
   ];
 
   var omniHistoricalRows = [
@@ -418,9 +426,13 @@ function reconcileMultiDayBalances() {
     ["2026-10-30 13:59:30 IST", "GITHUB_ACTIONS", "OMNI", "BUY", "BEL", 61, 368.39, 365.2, 374.85, "", "", "", 10732.42],
     ["2026-10-30 15:14:01 IST", "GITHUB_ACTIONS", "OMNI", "SELL", "BEL", 61, 367.46, "", "", -56.73, 7.9, -64.63, 10667.78],
     ["2026-10-30 15:14:01 IST", "GITHUB_ACTIONS", "OMNI", "COVER", "SBIN", 23, 961.4, "", "", 79.12, 7.82, 71.30, 10739.09],
+    ["2026-11-02 09:35:02 IST", "GITHUB_ACTIONS", "OMNI", "BUY", "BEL", 60, 375.01, 371.8, 381.65, "", "", "", 10739.09],
+    ["2026-11-02 13:15:08 IST", "GITHUB_ACTIONS", "OMNI", "SELL", "BEL", 60, 375.56, "", "", 33.0, 7.94, 25.06, 10764.15],
+    ["2026-11-02 13:15:38 IST", "GITHUB_ACTIONS", "OMNI", "BUY", "HINDALCO", 25, 902.17, 894.45, 918.0, "", "", "", 10764.15],
+    ["2026-11-02 15:14:01 IST", "GITHUB_ACTIONS", "OMNI", "SELL", "HINDALCO", 25, 907.75, "", "", 139.5, 7.99, 131.51, 10895.66],
   ];
 
-  // 1. Reconcile Live_Trades (merge all 4 days chronologically across all 3 tracks)
+  // 1. Reconcile Live_Trades (merge all 6 days chronologically across all 3 tracks)
   var tradesSheet = ss.getSheetByName("Live_Trades");
   if (tradesSheet && tradesSheet.getLastRow() > 1) {
     var data = tradesSheet.getDataRange().getValues();
@@ -437,7 +449,7 @@ function reconcileMultiDayBalances() {
     tradesSheet.getRange(1, 1, allTrades.length, header.length).setValues(allTrades);
   }
 
-  // 2. Reconcile Daily_Summary with true 4-Day cumulative equity numbers (15:14 IST cutoff)
+  // 2. Reconcile Daily_Summary with true 6-Day cumulative equity numbers (15:14 IST cutoff)
   var summarySheet = ss.getSheetByName("Daily_Summary");
   if (summarySheet) {
     var headers = [
@@ -453,6 +465,7 @@ function reconcileMultiDayBalances() {
       ["2026-10-28", "GITHUB_ACTIONS", "UPSTOX", 79460, 10024.99, 37.51, 0.38, 2, 100.0, 10091.13, 2.62, 0.03, 3, 66.7, 10844.76, 321.58, 3.06, 1, 100.0],
       ["2026-10-29", "GITHUB_ACTIONS", "ANGELONE", 133936, 10106.49, 81.5, 0.81, 2, 100.0, 10142.62, 51.49, 0.51, 2, 100.0, 10713.44, -131.31, -1.21, 2, 50.0],
       ["2026-10-30", "GITHUB_ACTIONS", "ANGELONE", 183044, 10088.40, -18.09, -0.18, 2, 50.0, 10068.60, -74.02, -0.73, 3, 33.3, 10739.09, 25.65, 0.24, 3, 66.7],
+      ["2026-11-02", "GITHUB_ACTIONS", "ANGELONE", 180072, 10202.38, 113.98, 1.13, 2, 100.0, 10138.12, 69.52, 0.69, 2, 100.0, 10895.66, 156.57, 1.46, 2, 100.0],
     ];
     summarySheet.clear();
     summarySheet.getRange(1, 1, reconciledRows.length, 19).setValues(reconciledRows);
@@ -460,17 +473,20 @@ function reconcileMultiDayBalances() {
     summarySheet.setFrozenRows(1);
   }
 
-  // 3. Also update Live_Dashboard to show all 3 tracks side-by-side
+  // 3. Also update Live_Dashboard to show all 3 tracks side-by-side (including 1.0x normalized & Kotak Neo vs 0.03% brokerage)
   var dashSheet = ss.getSheetByName("Live_Dashboard");
   if (dashSheet) {
     dashSheet.getRange(1, 1).setValue("DELTAUNO 3-TRACK LIVE NSE PAPER TRADING DASHBOARD");
-    dashSheet.getRange(5, 1, 1, 4).setValues([["STRATEGY TRACK COMPARISON (LIVE)", "Track A: High-Yield Compounder", "Track B: L2 Microstructure Harvester", "Track C: Bi-Directional Omni (Long+Short)"]])
+    dashSheet.getRange(2, 2).setValue("2026-11-02 15:14:01 IST");
+    dashSheet.getRange(3, 2).setValue("SESSION_COMPLETED (15:14 IST AUTO-SQUAREOFF)");
+    dashSheet.getRange(3, 4).setValue(180072);
+    dashSheet.getRange(5, 1, 1, 4).setValues([["STRATEGY TRACK COMPARISON (LIVE)", "Track A: High-Yield Compounder (1.0x)", "Track B: L2 Microstructure Harvester (1.0x)", "Track C: Bi-Directional Omni (2.15x / 1.0x Norm)"]])
       .setFontWeight("bold").setBackground("#283593").setFontColor("#ffffff");
     dashSheet.getRange(6, 2, 5, 3).setValues([
-      [10088.40, 10068.60, 10739.09],
-      [88.40, 68.60, 739.09],
-      ["+0.88%", "+0.69%", "+7.39%"],
-      ["7W / 10T (1W/2T Today)", "9W / 13T (1W/3T Today)", "9W / 11T (2W/3T Today)"],
+      [10202.38, 10138.12, 10895.66],
+      ["+₹202.38 (₹0 Brk) | +₹128.08 (0.03% Brk)", "+₹138.12 (₹0 Brk) | +₹45.27 (0.03% Brk)", "+₹895.66 (₹0 Brk) | +₹781.47 (0.03% Brk)"],
+      ["+2.02% (1.0x) | +₹16.87/trd", "+1.38% (1.0x) | +₹9.21/trd", "+8.96% (2.15x) | +4.17% (1.0x Norm) | +₹68.90/trd"],
+      ["9W / 12T (2W/2T Today)", "11W / 15T (2W/2T Today)", "11W / 13T (2W/2T Today)"],
       ["FLAT", "FLAT", "FLAT"]
     ]);
   }
@@ -505,6 +521,8 @@ function createAnalyticsCharts() {
   var latestDate = "";
   var minEq = 10000.0;
   var maxEq = 10000.0;
+  var totalTradesA = 0, totalTradesB = 0, totalTradesC = 0;
+  var greenDaysC = 0;
 
   for (var r = 0; r < summaryData.length; r++) {
     var dVal = summaryData[r][0];
@@ -516,6 +534,11 @@ function createAnalyticsCharts() {
     var eqA = parseFloat(summaryData[r][4]) || 10000.0;
     var eqB = parseFloat(summaryData[r][9]) || 10000.0;
     var eqC = parseFloat(summaryData[r][14]) || 10000.0;
+    var pnlC = parseFloat(summaryData[r][15]) || 0.0;
+    totalTradesA += (parseInt(summaryData[r][7], 10) || 0);
+    totalTradesB += (parseInt(summaryData[r][12], 10) || 0);
+    totalTradesC += (parseInt(summaryData[r][17], 10) || 0);
+    if (pnlC >= 0) greenDaysC++;
     latestTrackA = eqA;
     latestTrackB = eqB;
     latestTrackC = eqC;
@@ -529,7 +552,7 @@ function createAnalyticsCharts() {
   var combinedNet = Math.round(((latestTrackA - 10000.0) + (latestTrackB - 10000.0) + (latestTrackC - 10000.0)) * 100) / 100;
   var combinedNetStr = (combinedNet >= 0 ? "+₹" : "-₹") + Math.abs(combinedNet).toFixed(2);
 
-  chartSheet.getRange(1, 1, 6, 26).clear();
+  chartSheet.getRange(1, 1, 7, 26).clear();
 
   // 1. Header Banner
   chartSheet.getRange(1, 1, 1, 16).merge()
@@ -626,10 +649,34 @@ function createAnalyticsCharts() {
 
   // Combined 3-Track Net
   chartSheet.getRange(6, 13, 1, 2).merge().setValue(combinedNetStr).setFontWeight("bold").setFontSize(12).setFontColor(combinedNet >= 0 ? "#1b5e20" : "#b71c1c").setHorizontalAlignment("center").setVerticalAlignment("middle");
-  chartSheet.getRange(6, 15, 1, 2).merge().setValue("3/3 Days Green (C)").setFontWeight("bold").setFontSize(10).setFontColor("#37474f").setHorizontalAlignment("center").setVerticalAlignment("middle");
+  chartSheet.getRange(6, 15, 1, 2).merge().setValue(greenDaysC + "/" + summaryData.length + " Days Green (C)").setFontWeight("bold").setFontSize(10).setFontColor("#37474f").setHorizontalAlignment("center").setVerticalAlignment("middle");
+
+  // Row 7: 1.0x Leverage-Normalized Return, Net Expectancy (₹/trd), and Kotak Neo (₹0 Brk) vs Discount Broker (0.03% Brk)
+  var expA = totalTradesA > 0 ? ((latestTrackA - 10000.0) / totalTradesA) : 0.0;
+  var expB = totalTradesB > 0 ? ((latestTrackB - 10000.0) / totalTradesB) : 0.0;
+  var expC = totalTradesC > 0 ? ((latestTrackC - 10000.0) / totalTradesC) : 0.0;
+  var normRetC = cDelta / 2.15;
+  var discNetA = (latestTrackA - 10000.0) - (totalTradesA * 6.19);
+  var discNetB = (latestTrackB - 10000.0) - (totalTradesB * 6.19);
+  var discNetC = (latestTrackC - 10000.0) - (totalTradesC * 8.78);
+  var discCombined = discNetA + discNetB + discNetC;
+
+  chartSheet.getRange(7, 1, 1, 4).merge()
+    .setValue("1.0x: +" + aDelta.toFixed(2) + "% | Exp: +₹" + expA.toFixed(2) + "/trd | 0.03% Brk: +₹" + discNetA.toFixed(2))
+    .setFontSize(8).setFontWeight("bold").setBackground("#f8fafc").setFontColor("#334155").setHorizontalAlignment("center").setVerticalAlignment("middle");
+  chartSheet.getRange(7, 5, 1, 4).merge()
+    .setValue("1.0x: +" + bDelta.toFixed(2) + "% | Exp: +₹" + expB.toFixed(2) + "/trd | 0.03% Brk: +₹" + discNetB.toFixed(2))
+    .setFontSize(8).setFontWeight("bold").setBackground("#f8fafc").setFontColor("#334155").setHorizontalAlignment("center").setVerticalAlignment("middle");
+  chartSheet.getRange(7, 9, 1, 4).merge()
+    .setValue("1.0x Norm: +" + normRetC.toFixed(2) + "% | Exp: +₹" + expC.toFixed(2) + "/trd | 0.03% Brk: +₹" + discNetC.toFixed(2))
+    .setFontSize(8).setFontWeight("bold").setBackground("#fffbeb").setFontColor("#9a3412").setHorizontalAlignment("center").setVerticalAlignment("middle");
+  chartSheet.getRange(7, 13, 1, 4).merge()
+    .setValue("Kotak Neo (₹0 Brk): " + combinedNetStr + " | 0.03% Brk: +₹" + discCombined.toFixed(2))
+    .setFontSize(8).setFontWeight("bold").setBackground("#f0fdf4").setFontColor("#166534").setHorizontalAlignment("center").setVerticalAlignment("middle");
 
   chartSheet.setRowHeight(5, 24);
-  chartSheet.setRowHeight(6, 32);
+  chartSheet.setRowHeight(6, 30);
+  chartSheet.setRowHeight(7, 22);
 
   // 4. Dynamic Formula Engine in Columns U, V, W, X (Cols 21..24) linked to C3 & I3
   chartSheet.getRange("U1").setValue("Date");

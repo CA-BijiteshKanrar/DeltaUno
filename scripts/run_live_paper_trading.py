@@ -189,17 +189,28 @@ def generate_totp(secret: str) -> str:
 
 
 class LiveQuoteProvider:
-    """Unified interface for Zerodha, Upstox, AngelOne, and Yahoo Finance live quotes."""
+    """Unified interface for Kotak Neo, Zerodha, Upstox, AngelOne, and Yahoo Finance live quotes."""
 
     def __init__(self, requested_provider: str = "auto"):
         self.provider = self._detect_provider(requested_provider)
         self.angel_jwt: Optional[str] = os.environ.get("ANGELONE_JWT_TOKEN")
+        self.kotak_auth: Optional[Tuple[str, str, str]] = None  # (base_url, session_token, sid)
         self._angel_conn: Optional[http.client.HTTPSConnection] = None
         self._upstox_conn: Optional[http.client.HTTPSConnection] = None
         self._last_nifty_ts: float = 0.0
         self._last_nifty_meta: Optional[Tuple[float, float, float]] = None
         self.prev_volumes: Dict[str, int] = {}
         self.prev_prices: Dict[str, float] = {}
+
+    @staticmethod
+    def _has_kotakneo_creds() -> bool:
+        return bool(
+            os.environ.get("KOTAK_CONSUMER_KEY")
+            and os.environ.get("KOTAK_MOBILE")
+            and os.environ.get("KOTAK_UCC")
+            and os.environ.get("KOTAK_TOTP_SECRET")
+            and os.environ.get("KOTAK_MPIN")
+        )
 
     @staticmethod
     def _has_angelone_creds() -> bool:
@@ -223,6 +234,8 @@ class LiveQuoteProvider:
         req = requested.lower()
         if req != "auto":
             return req
+        if self._has_kotakneo_creds():
+            return "kotakneo"
         if os.environ.get("ZERODHA_API_KEY") and os.environ.get("ZERODHA_ACCESS_TOKEN"):
             return "zerodha"
         # Angel One is Primary (0 timeouts, persistent keep-alive, daily auto-TOTP)
@@ -232,6 +245,58 @@ class LiveQuoteProvider:
         if self._has_upstox_creds():
             return "upstox"
         return "yahoo"
+
+    def _kotakneo_login(self) -> Optional[Tuple[str, str, str]]:
+        """Authenticate with Kotak Neo Trade API v2 (totp_login + totp_validate) for ₹0 API brokerage."""
+        if self.kotak_auth:
+            return self.kotak_auth
+        consumer_key = os.environ.get("KOTAK_CONSUMER_KEY", "")
+        mobile = os.environ.get("KOTAK_MOBILE", "")
+        ucc = os.environ.get("KOTAK_UCC", "")
+        totp_secret = os.environ.get("KOTAK_TOTP_SECRET", "")
+        mpin = os.environ.get("KOTAK_MPIN", "")
+        if not (consumer_key and mobile and ucc and totp_secret and mpin):
+            return None
+        if not mobile.startswith("+91"):
+            mobile = "+91" + mobile.lstrip("0")
+        totp = generate_totp(totp_secret)
+
+        # Step 1: TOTP Login -> returns view token & sid
+        login_url = "https://mis.kotaksecurities.com/login/1.0/tradeApiLogin"
+        login_body = json.dumps({"mobileNumber": mobile, "ucc": ucc, "totp": totp}).encode("utf-8")
+        login_headers = {
+            "Authorization": consumer_key,
+            "neo-fin-key": "neotradeapi",
+            "Content-Type": "application/json",
+        }
+        req1 = urllib.request.Request(login_url, data=login_body, headers=login_headers, method="POST")
+        with urllib.request.urlopen(req1, timeout=5.0) as r1:
+            d1 = json.loads(r1.read().decode("utf-8")).get("data", {})
+        view_token = d1.get("token")
+        view_sid = d1.get("sid")
+        if not (view_token and view_sid):
+            return None
+
+        # Step 2: MPIN Validate -> returns session token, sid, and baseUrl
+        val_url = "https://mis.kotaksecurities.com/login/1.0/tradeApiValidate"
+        val_body = json.dumps({"mpin": mpin}).encode("utf-8")
+        val_headers = {
+            "Authorization": consumer_key,
+            "neo-fin-key": "neotradeapi",
+            "sid": view_sid,
+            "Auth": view_token,
+            "Content-Type": "application/json",
+        }
+        req2 = urllib.request.Request(val_url, data=val_body, headers=val_headers, method="POST")
+        with urllib.request.urlopen(req2, timeout=5.0) as r2:
+            d2 = json.loads(r2.read().decode("utf-8")).get("data", {})
+        base_url = d2.get("baseUrl", "https://gw-napi.kotaksecurities.com").rstrip("/")
+        sess_token = d2.get("token")
+        sess_sid = d2.get("sid")
+        if sess_token and sess_sid:
+            self.kotak_auth = (base_url, sess_token, sess_sid)
+            return self.kotak_auth
+        return None
 
     def _angelone_login(self) -> Optional[str]:
         if self.angel_jwt:
@@ -266,10 +331,12 @@ class LiveQuoteProvider:
 
     def fetch_all_ticks(self) -> List[str]:
         """
-        Fetch live quotes for all 5 instruments using Dual-Broker Hot-Failover:
-        Primary L2 Broker (AngelOne/Upstox) -> Standby L2 Broker (Upstox/AngelOne) -> Yahoo Last-Resort.
+        Fetch live quotes for all 10 instruments using Multi-Broker Hot-Failover:
+        Kotak Neo / AngelOne / Upstox -> Standby L2 Broker -> Yahoo Last-Resort.
         """
         try:
+            if self.provider == "kotakneo":
+                return self._fetch_kotakneo()
             if self.provider == "zerodha":
                 return self._fetch_zerodha()
             if self.provider == "angelone":
@@ -278,17 +345,17 @@ class LiveQuoteProvider:
                 return self._fetch_upstox()
         except Exception as primary_err:
             # Hot-Failover to secondary real L2 broker before touching synthetic Yahoo depth
-            if self.provider == "angelone" and self._has_upstox_creds():
-                try:
-                    return self._fetch_upstox()
-                except Exception as sec_err:
-                    print(f"[WARN] Primary 'angelone' ({primary_err}) & Standby 'upstox' ({sec_err}) failed; falling back to Yahoo.", flush=True)
-                    return self._fetch_yahoo()
-            elif self.provider == "upstox" and self._has_angelone_creds():
+            if self.provider in ("kotakneo", "upstox") and self._has_angelone_creds():
                 try:
                     return self._fetch_angelone()
                 except Exception as sec_err:
-                    print(f"[WARN] Primary 'upstox' ({primary_err}) & Standby 'angelone' ({sec_err}) failed; falling back to Yahoo.", flush=True)
+                    print(f"[WARN] Primary '{self.provider}' ({primary_err}) & Standby 'angelone' ({sec_err}) failed; falling back to Yahoo.", flush=True)
+                    return self._fetch_yahoo()
+            elif self.provider in ("kotakneo", "angelone") and self._has_upstox_creds():
+                try:
+                    return self._fetch_upstox()
+                except Exception as sec_err:
+                    print(f"[WARN] Primary '{self.provider}' ({primary_err}) & Standby 'upstox' ({sec_err}) failed; falling back to Yahoo.", flush=True)
                     return self._fetch_yahoo()
             print(f"[WARN] Broker provider '{self.provider}' error ({primary_err}); falling back to Yahoo Live.", flush=True)
         return self._fetch_yahoo()
@@ -367,6 +434,43 @@ class LiveQuoteProvider:
                 ]
             )
         return ",".join(base_cols)
+
+    def _fetch_kotakneo(self) -> List[str]:
+        auth = self._kotakneo_login()
+        if not auth:
+            raise RuntimeError("Kotak Neo session unavailable")
+        base_url, _, _ = auth
+        consumer_key = os.environ["KOTAK_CONSUMER_KEY"]
+        queries = ",".join(f"nse_cm|{inst['angel_token']}" for inst in INSTRUMENTS)
+        url = f"{base_url}/script-details/1.0/quotes/neosymbol/{urllib.parse.quote(queries, safe='|,')}/all"
+        req = urllib.request.Request(
+            url,
+            headers={
+                "Authorization": consumer_key,
+                "Content-Type": "application/json",
+            },
+        )
+        ts_ns = time.time_ns()
+        lines = []
+        with urllib.request.urlopen(req, timeout=4.0) as resp:
+            items = json.loads(resp.read().decode("utf-8"))
+        if isinstance(items, dict):
+            items = items.get("data", items.get("message", []))
+        by_tok = {str(item.get("exchange_token", "")): item for item in items if isinstance(item, dict)}
+        for inst in INSTRUMENTS:
+            q = by_tok.get(inst["angel_token"])
+            if not q:
+                continue
+            ltp = float(q.get("ltp", inst["ref_price"]))
+            vol = int(q.get("last_volume", 1000))
+            last_qty = int(q.get("ltq", 50))
+            uc = float(q.get("upper_circuit_limit", ltp * 1.10))
+            lc = float(q.get("lower_circuit_limit", ltp * 0.90))
+            depth = q.get("depth", {})
+            bids = [(float(b["price"]), int(b["quantity"])) for b in depth.get("buy", [])[:5] if float(b.get("price", 0) or 0) > 0]
+            asks = [(float(a["price"]), int(a["quantity"])) for a in depth.get("sell", [])[:5] if float(a.get("price", 0) or 0) > 0]
+            lines.append(self._format_l2_csv_line(ts_ns, inst, ltp, last_qty, vol, bids, asks, uc, lc))
+        return lines
 
     def _fetch_zerodha(self) -> List[str]:
         api_key = os.environ["ZERODHA_API_KEY"]
@@ -1007,7 +1111,7 @@ def main() -> int:
     parser.add_argument(
         "--provider",
         default="auto",
-        choices=["auto", "zerodha", "upstox", "angelone", "yahoo"],
+        choices=["auto", "kotakneo", "zerodha", "upstox", "angelone", "yahoo"],
         help="Live market quote provider (default: auto-detect from config/live_broker.env)",
     )
     parser.add_argument(
@@ -1025,8 +1129,8 @@ def main() -> int:
     parser.add_argument(
         "--max-runtime-minutes",
         type=float,
-        default=0.0,
-        help="Optional max runtime in minutes before graceful EOD square-off (0 = run until 15:30 IST)",
+        default=355.0,
+        help="Max runtime in minutes before graceful EOD square-off (default: 355 = 09:15 to 15:10/15:15 IST)",
     )
     parser.add_argument(
         "--self-test",
@@ -1161,15 +1265,16 @@ def main() -> int:
     start_monotonic = time.monotonic()
     last_heartbeat = 0.0
     init_ist = datetime.now(TZ_IST)
-    started_before_close = init_ist.hour < 15 or (init_ist.hour == 15 and init_ist.minute < 30)
+    started_before_close = init_ist.hour < 15 or (init_ist.hour == 15 and init_ist.minute < 15)
+    last_tick_batch: List[str] = []
 
     try:
         with open(live_csv, "a", encoding="utf-8", newline="\n") as f:
             while not stop_requested and proc.poll() is None:
                 now_ist = datetime.now(TZ_IST)
-                # Automatically end session at 15:30:00 IST if started before market close
-                if started_before_close and (now_ist.hour > 15 or (now_ist.hour == 15 and now_ist.minute >= 30)):
-                    print("\n[MARKET CLOSE] 15:30 IST reached. Closing live session cleanly...", flush=True)
+                # Automatically end session at 15:15:00 IST (1 minute after 15:14:00 IST engine auto-squareoff)
+                if started_before_close and (now_ist.hour > 15 or (now_ist.hour == 15 and now_ist.minute >= 15)):
+                    print("\n[MARKET CLOSE] 15:15 IST reached (post 15:14 IST square-off). Closing live session cleanly...", flush=True)
                     break
 
                 if args.max_runtime_minutes > 0:
@@ -1179,6 +1284,8 @@ def main() -> int:
                         break
 
                 tick_lines = provider.fetch_all_ticks()
+                if tick_lines:
+                    last_tick_batch = list(tick_lines)
                 nifty_res = provider.fetch_nifty_quote()
                 if nifty_res:
                     n_line, n_ltp, n_ret = nifty_res
@@ -1196,6 +1303,25 @@ def main() -> int:
                 time.sleep(args.poll_interval)
     finally:
         with open(live_csv, "a", encoding="utf-8", newline="\n") as f:
+            # Safety net: if the runner exits before 15:14:00 IST while any track holds an open position,
+            # emit two synthetic 15:14:01 IST square-off ticks from the latest quotes so the C++ engine
+            # flattens all intraday positions on Tick[t+1] before #SESSION_END.
+            has_open = any(
+                sheets_sync.tracks[t]["open_pos"] != "FLAT"
+                for t in ("COMPOUNDER", "HARVESTER", "OMNI")
+            )
+            if has_open and last_tick_batch and proc.poll() is None:
+                print("[EOD SAFETY] Open positions detected at session exit; emitting 15:14:01 IST auto-squareoff ticks...", flush=True)
+                sq_dt = datetime.now(TZ_IST).replace(hour=15, minute=14, second=1, microsecond=0)
+                sq_ts_ns = int(sq_dt.timestamp() * 1_000_000_000)
+                for step in range(2):
+                    ts_val = sq_ts_ns + step * 500_000_000
+                    for raw_l in last_tick_batch:
+                        parts = raw_l.split(",", 1)
+                        if len(parts) == 2:
+                            f.write(f"{ts_val},{parts[1]}\n")
+                    f.flush()
+                    time.sleep(0.5)
             f.write("#SESSION_END\n")
             f.flush()
         proc.wait(timeout=15.0)

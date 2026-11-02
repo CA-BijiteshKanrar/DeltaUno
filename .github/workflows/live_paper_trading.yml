@@ -1,12 +1,12 @@
 name: DeltaUno Live NSE Paper Trading (Dual-Mode)
 
 on:
-  # Staggered off-minute weekday crons around market open to avoid GitHub's top-of-hour cron backlog
+  # Staggered off-minute weekday crons right after 09:15 IST open so 360m job timeout covers 15:14:00 IST auto-squareoff
   # Duplicate/late runs are automatically skipped by concurrency lock + Daily_Summary completion check
   schedule:
-    - cron: "13 3 * * 1-5"
-    - cron: "27 3 * * 1-5"
-    - cron: "42 3 * * 1-5"
+    - cron: "46 3 * * 1-5"
+    - cron: "52 3 * * 1-5"
+    - cron: "58 3 * * 1-5"
 
   # Allows instant manual test or automated Google Apps Script trigger
   workflow_dispatch:
@@ -21,12 +21,13 @@ on:
           - compounder
           - harvester
       provider:
-        description: "Live Market Feed Provider (auto, angelone, zerodha, upstox, yahoo)"
+        description: "Live Market Feed Provider (auto, kotakneo, angelone, zerodha, upstox, yahoo)"
         required: false
         default: "auto"
         type: choice
         options:
           - auto
+          - kotakneo
           - angelone
           - zerodha
           - upstox
@@ -37,9 +38,9 @@ on:
         default: true
         type: boolean
       max_runtime_minutes:
-        description: "Max runtime in minutes before graceful EOD report (e.g. 350 for full day, 2 for quick test)"
+        description: "Max runtime in minutes before graceful EOD report (e.g. 355 for full day through 15:14 IST, 2 for quick test)"
         required: false
-        default: "350"
+        default: "355"
         type: string
 
 permissions:
@@ -51,11 +52,16 @@ concurrency:
 
 jobs:
   live-paper-trading:
-    name: Dual-Mode Live Paper Trading (Track A + Track B)
+    name: Dual-Mode Live Paper Trading (Track A + Track B + Track C Omni)
     runs-on: ubuntu-latest
     timeout-minutes: 360
     env:
       TZ: Asia/Kolkata
+      KOTAK_CONSUMER_KEY: ${{ secrets.KOTAK_CONSUMER_KEY }}
+      KOTAK_MOBILE: ${{ secrets.KOTAK_MOBILE }}
+      KOTAK_UCC: ${{ secrets.KOTAK_UCC }}
+      KOTAK_TOTP_SECRET: ${{ secrets.KOTAK_TOTP_SECRET }}
+      KOTAK_MPIN: ${{ secrets.KOTAK_MPIN }}
       ANGELONE_API_KEY: ${{ secrets.ANGELONE_API_KEY }}
       ANGELONE_CLIENT_CODE: ${{ secrets.ANGELONE_CLIENT_CODE }}
       ANGELONE_PIN: ${{ secrets.ANGELONE_PIN }}
@@ -87,14 +93,14 @@ jobs:
           MODE="${{ github.event.inputs.mode || 'both' }}"
           PROVIDER="${{ github.event.inputs.provider || 'auto' }}"
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            MAX_MIN="${{ github.event.inputs.max_runtime_minutes || '350' }}"
+            MAX_MIN="${{ github.event.inputs.max_runtime_minutes || '355' }}"
             if [ "${{ github.event.inputs.start_now }}" = "true" ]; then
               START_FLAG="--start-now"
             else
               START_FLAG=""
             fi
           else
-            MAX_MIN="350"
+            MAX_MIN="355"
             START_FLAG=""
           fi
 
