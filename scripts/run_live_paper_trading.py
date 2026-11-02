@@ -876,7 +876,7 @@ class GoogleSheetsLiveSync:
         self.webhook_url = webhook_url.strip()
         self.provider_name = provider_name.upper()
         self.mode = mode.upper()
-        self.source = "GITHUB_ACTIONS" if os.environ.get("GITHUB_ACTIONS") == "true" else "LOCAL"
+        self.source = "LIVE_OOS" if os.environ.get("GITHUB_ACTIONS") == "true" else "LOCAL_LIVE"
         self.lock = threading.Lock()
         self.ticks_streamed = 0
         self.latest_quotes: List[Dict[str, Any]] = []

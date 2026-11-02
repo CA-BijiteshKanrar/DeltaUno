@@ -1,286 +1,180 @@
-# DeltaUno: Low-Latency C++20 3-Track Algorithmic Trading Engine
+# DeltaUno: C++20 3-Track Intraday Paper-Trading & Microstructure Research Laboratory
 
-A modular, high-performance **C++20 algorithmic trading engine** engineered for capital preservation and disciplined multi-day compounding on a ring-fenced pilot account (**₹10,000 / ~\$115 per track**).
+A deterministic **C++20 intraday trading engine and forward-testing laboratory** built to evaluate order-flow imbalance (OFI) and momentum hypotheses on Indian Equities (**NSE/BSE**, ₹0.05 tick precision) using a ring-fenced **₹10,000 (~$115) per-track research capital baseline**.
 
-Built for **Indian Equities (NSE/BSE)** with ₹0.05 tick-size precision, **3-Track Parallel Paper Trading (`--mode both`: Track A Compounder + Track B Harvester + Track C Bi-Directional Omni)**, real-time **Live-Tail streaming (`--live-tail`)**, **Dual-Broker Hot-Failover (`AngelOne SmartAPI` ⇄ `Upstox v2`)**, and automated cloud telemetry via **GitHub Actions + Google Sheets v2.5 Interactive Command Center**, grounded in 10 peer-reviewed market microstructure and momentum papers.
+DeltaUno runs **three parallel strategy tracks (`--mode both`: Track A Compounder, Track B Harvester, Track C Bi-Directional Omni)** on a shared 5-level Level-2 quote stream (`--live-tail`), with multi-broker REST polling (**Kotak Neo Trade API v2**, **AngelOne SmartAPI**, **Upstox API v2**) and automated logging to Google Sheets via GitHub Actions.
+
+> [!IMPORTANT]
+> **Research Status & Parameter Freeze (`v3.3.0`)**:
+> - **Parameters Frozen as of `2026-11-02`**: Sessions from `2026-10-26` to `2026-10-30` (`5` sessions, `534,900` recorded ticks) were used to iterate on strategy rules, universe selection, and exit timing, and are strictly **in-sample (`REPLAY_V3.2`)**.
+> - **Out-of-Sample (`LIVE_OOS`) Validation Window**: Starting **`2026-11-02` onward**, all strategy parameters, thresholds, position-sizing rules, and execution windows are frozen. No strategy edge is claimed until **60–100+ out-of-sample sessions (`>= 100` signals per track)** are completed under the pre-committed pass/fail criteria in [Section 2](#-out-of-sample-validation-protocol--passfail-criteria).
 
 ---
 
 ## 🏛️ System Architecture
 
 ```text
-[ Live NSE L2 Feed (AngelOne Primary ⇄ Upstox Hot-Standby) ]   [ External Trader Webhook / Alert ]
-                          │                                                     │
-                          ▼                                                     ▼
-          [ Lock-Free SPSC Tick Ring Buffer ]                   [ Lock-Free SPSC Alert Ring Buffer ]
-                          │                                                     │
-                          ▼                                                     ▼
-          [ 5-Level L2 Order Book & Microstructure ] ─────────► [ Signal Ingestor ("BS Detector") ]
-             ├── Multi-Level Depth OFI (Cont 2014)                 ├── Local OFI >= 0.20 Check
-             ├── Multi-Horizon Blend (Kolm 2023)                   └── >2% Price / >4x Vol Trap Veto
-             ├── Top-5 Bid/Ask & Ask/Bid Depth Ratios                           │
-             ├── Top-of-Book L1 Executable Liquidity Gate (Almgren-Chriss 2000) │
-             └── Queue-Weighted Microprice & Institutional Session VWAP         │
-                          │                                                     │
-                          ├─────────────────────────────────────────────────────┘
+[ Live NSE 1s REST Poller (Kotak Neo / AngelOne ⇄ Upstox) ]     [ External Webhook / Alert ]
+                          │ (~190–210 ms HTTP Poll Latency)                   │
+                          ▼                                                   ▼
+          [ Lock-Free SPSC Tick Ring Buffer ]                 [ Lock-Free SPSC Alert Ring Buffer ]
+                          │                                                   │
+                          ▼                                                   ▼
+          [ 5-Level L2 Order Book & Microstructure ] ───────► [ Signal Ingestor (Heuristic Filter) ]
+             ├── 5-Level Depth OFI (inspired by Cont 2014)       ├── Local OFI >= 0.20 Check
+             ├── Multi-Horizon OFI Blend (1/5/20 ticks)          └── >2% Price / >4x Vol Spike Veto
+             ├── Top-5 Bid/Ask & Ask/Bid Depth Ratios                         │
+             ├── Top-of-Book L1 Liquidity Filter (Qty >= 50)                  │
+             └── Queue-Weighted Microprice & Session VWAP                     │
+                          │                                                   │
+                          ├───────────────────────────────────────────────────┘
                           ▼
           [ 3-Track Parallel Strategy & Risk Engine (--mode both) ]
-             ├── Track A: High-Yield Compounder (Long-Only, Dynamic Daily Equity Compounding,
+             ├── Track A: Compounder (Long-Only, 1.0x Cash, 1.20% Risk/Trade,
              │            09:35–11:00 & 13:30–14:15 IST, -0.85% SL / +1.75% TP, +0.90% BE Ratchet)
-             ├── Track B: L2 Microstructure Harvester v3.1 (Long-Only, 09:35–11:00 & 13:30–14:45 IST,
-             │            -0.55% Tight SL, +0.55% Min Harvest Floor, Almgren-Chriss L1 Qty >= 50 Gate)
-             └── Track C: Bi-Directional Omni v3.1 (Dual-Slot [1 Long + 1 Short] Independent Book,
-                          2.15x MIS Risk-Scaled Dynamic Compounding [1.80% Risk/Slot],
-                          Continuous 09:35–14:45 IST Window + High-Conviction Midday Tier,
-                          L1 Qty >= 50 Stub Gate + Gao-Moskowitz Intraday TSMOM Short Breakdown)
+             ├── Track B: Harvester (Long-Only, 1.0x Cash, 1.20% Risk/Trade,
+             │            09:35–11:00 & 13:30–14:45 IST, -0.55% SL, +0.55% Min Harvest Floor)
+             └── Track C: Bi-Directional Omni (1 Long + 1 Short Slot, 2.15x MIS Leverage [1.80% Risk],
+                          09:35–14:45 IST Window, reported both raw 2.15x and 1.0x Leverage-Normalized)
                           │
                           ▼
-          [ Pre-Trade Risk Manager (14 Institutional Shields per Track) ]
-             ├── Cross-Day Dynamic Fixed-Risk Sizing (1.2%–1.8% risk & 1.0x–2.15x MIS notional cap)
-             ├── NIFTY 50 Macro Regime Shield (Blocks Longs when NIFTY drops <= -0.35% below Open)
-             ├── Net / Peak-to-Trough Daily Drawdown Kill-Switch (₹500 / 5%)
-             ├── Asymmetric Zero-Loss Break-Even (+0.90% Long / +0.45% Short trigger -> 0.15% lock)
-             ├── NSE Auto-Squareoff Shield (15:14:00 IST Institutional Closing Momentum Auto-Squareoff)
+          [ Pre-Trade Risk Manager (14 Deterministic Risk Controls per Track) ]
+             ├── Fixed-Risk Position Sizing (1.2%–1.8% risk & 1.0x–2.15x MIS notional cap)
+             ├── NIFTY 50 Regime Filter (Blocks Longs when NIFTY drops <= -0.35% below Open)
+             ├── Intraday Drawdown Kill-Switch (₹500 / 5% daily loss limit)
+             ├── Break-Even Stop Ratchet (+0.90% Long / +0.45% Short trigger -> +0.15% lock)
+             ├── Pre-RMS Intraday Auto-Squareoff (15:14:00 IST — 1 min before 15:15 broker RMS cutoff)
              ├── Circuit Band Guard (1.5% distance check) & Macro Event Freeze (RBI / Budget / FOMC)
-             └── Statutory Friction Filter (Expected Gain >= 2.5x Zerodha NSE MIS Fees)
+             └── Statutory Friction Filter (Expected Gain >= 2.5x NSE MIS Statutory Taxes)
                           │
                           ▼
-          [ Paper Broker / Execution Gateway & Live Cloud Telemetry ]
-             ├── Strict Zero Look-Ahead Bias (Tick[t] orders fill strictly on Tick[t+1])
-             ├── Almgren-Chriss Non-Linear Adverse Bid/Ask Slippage Model
-             ├── Penny-Accurate NSE MIS Taxes (Symmetric Long & Short STT, Turnover, GST, Stamp, SEBI)
-             └── Real-Time [LIVE_EVENT] JSON Stream ──► Google Sheets v2.5 3-Track Command Center
+          [ Paper Broker & Provenance-Tagged Telemetry ]
+             ├── Zero Look-Ahead Bias (Tick[t] orders match strictly on Tick[t+1])
+             ├── Adverse Bid/Ask Sweep Slippage Model
+             ├── NSE MIS Statutory Taxes + Explicit 0.03% Discount Broker vs. ₹0 Kotak Neo API Audit
+             └── Provenance-Tagged Google Sheets Ledger (REPLAY_V3.2 vs. LIVE_OOS vs. REPLAY_EOD_FIX)
 ```
 
 ---
 
-## ⚡ 3-Track Parallel Execution (`--mode both`) & Benchmarks
+## 📊 Empirical Results, Provenance Split & Known Limitations
 
-Every run of `deltauno --mode both` executes **three independent strategy/risk pipelines simultaneously in lockstep** on the exact same incoming L2 tick stream:
+### 1. 6-Session NSE Recorded Tick Ledger (`2026-10-26` to `2026-11-02` — `714,972` Ticks)
 
-### 1. Live NSE Recorded L2 Tick Benchmark (6 Full Sessions: `714,972` Real NSE L2 Ticks — `v3.3.0`)
+To prevent conflating retroactive parameter tuning with live forward performance, every trade and session in the ledger is explicitly tagged by **Provenance**:
+- **`REPLAY_V3.2 (IN-SAMPLE)` (`2026-10-26` to `2026-10-30`, 5 sessions)**: Recorded live from AngelOne/Upstox, but replayed after `v3.1`/`v3.2` parameter adjustments (`10`-stock universe expansion, `2.15x` MIS sizing on Track C, `-0.55%` SL on Track B, `15:14 IST` square-off). Treated strictly as **in-sample fitting data**.
+- **`LIVE_OOS` (`2026-11-02` onward)**: Executed live in real time under frozen `v3.2` rules (`4` of `6` trades closed live before `15:05 IST`; the `2` open `HINDALCO` positions in Track A and Track C were squared off via `REPLAY_EOD_FIX` at `15:14:01 IST` due to the `350`-minute workflow timer bug fixed in `v3.3.0`).
 
-Replayed across six consecutive full NSE market sessions (`2026-10-26`, `2026-10-27`, `2026-10-28`, `2026-10-29`, `2026-10-30`, `2026-11-02`) recorded live from AngelOne SmartAPI and Upstox v2 with cross-day dynamic equity compounding (`--compounder-capital`, `--harvester-capital`, `--omni-capital`), `15:14:00 IST` closing institutional momentum auto-squareoff, **1.0x Leverage-Normalized Return**, **Net Expectancy (`₹/trade`)**, and **Kotak Neo (`₹0` API Brokerage) vs. Discount Broker (`0.03%` Brokerage)**:
+| Strategy Track | Leverage & Sizing | In-Sample Replay (`Oct 26–30`, 5d) | Out-of-Sample (`Nov 02`, 1d) | 6-Day Ending Equity | Net PnL (**Kotak Neo `₹0` Brk**) | Net PnL (`0.03%` Brk) | `1.0x` Norm Return | Avg Win / Avg Loss | Net Expectancy (`₹/trd`) | Win Rate (`40` Trades) |
+| :--- | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **Track C: Bi-Directional Omni (`OMNI`)** | `2.15x` MIS (`1.80%` Risk) | `+₹739.09` (`11T`) | `+₹156.57` (`2T`) | `₹10,895.66` | **`+₹895.66 (+8.96%)`** | `+₹781.52 (+7.82%)` | **`+4.17%`** | `+₹105.51` / `-₹132.46` | **`+₹68.90/trd`** | `84.6%` (`11W/2L`) |
+| **Track A: Compounder** | `1.0x` Cash (`1.20%` Risk) | `+₹88.40` (`10T`) | `+₹113.98` (`2T`) | `₹10,202.38` | **`+₹202.38 (+2.02%)`** | `+₹128.10 (+1.28%)` | **`+2.02%`** | `+₹37.61` / `-₹45.38` | **`+₹16.86/trd`** | `75.0%` (`9W/3L`) |
+| **Track B: Harvester** | `1.0x` Cash (`1.20%` Risk) | `+₹68.60` (`13T`) | `+₹69.52` (`2T`) | `₹10,138.12` | **`+₹138.12 (+1.38%)`** | `+₹45.27 (+0.45%)` | **`+1.38%`** | `+₹32.50` / `-₹54.85` | **`+₹9.21/trd`** | `73.3%` (`11W/4L`) |
+| **Combined (`₹30,000` Start)** | All 3 Tracks | `+₹896.09` (`34T`) | `+₹340.07` (`6T`) | `₹31,236.16` | **`+₹1,236.16 (+4.12%)`** | `+₹954.89 (+3.18%)` | **`+2.52%`** | — | **`+₹30.90/trd`** | `77.5%` (`31W/9L`) |
 
-| Strategy Track | Direction, Sizing & Leverage | 2026-10-26 | 2026-10-27 | 2026-10-28 | 2026-10-29 | 2026-10-30 | 2026-11-02 | 6-Day Ending Equity | Net PnL (Kotak Neo `₹0` Brk) | Net PnL (`0.03%` Brk) | `1.0x` Norm Return | Net Expectancy (`₹/trd`) | Win Rate | Green Days |
-| :--- | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **Track C: Bi-Directional Omni (`OMNI` v3.3)** | **`1 Long` + `1 Short` (`1.80%` Risk, `2.15x` MIS)** | `+₹58.86` | **`+₹464.31`** | **`+₹321.58`** | `-₹131.31` | **`+₹25.65`** | **`+₹156.57`** | **`₹10,895.66`** | **`+₹895.66 (+8.96%)`** | **`+₹781.47 (+7.81%)`** | **`+4.17%`** | **`+₹68.90/trd`** | **`84.6%` (11W/2L)** | **`5 / 6 (83.3%)`** |
-| **Track A: High-Yield Compounder** | `LONG` Only (`1.20%` Risk, `1.0x` Cash) | `-₹12.55` | `+₹0.04` | `+₹37.51` | **`+₹81.50`** | `-₹18.09` | **`+₹113.98`** | **`₹10,202.38`** | **`+₹202.38 (+2.02%)`** | **`+₹128.08 (+1.28%)`** | **`+2.02%`** | **`+₹16.87/trd`** | **`75.0%` (9W/3L)** | `4 / 6 (66.7%)` |
-| **Track B: L2 Microstructure Harvester (`v3.3`)** | `LONG` Only (`-0.55%` SL, `+0.55%` Min Harvest, `1.0x`) | `+₹69.78` | `+₹18.73` | `+₹2.62` | **`+₹51.49`** | `-₹74.02` | **`+₹69.52`** | **`₹10,138.12`** | **`+₹138.12 (+1.38%)`** | **`+₹45.27 (+0.45%)`** | **`+1.38%`** | **`+₹9.21/trd`** | **`73.3%` (11W/4L)** | **`5 / 6 (83.3%)`** |
-| **Combined 3-Track Portfolio** | **All 3 Tracks (`₹30,000` Start)** | **`+₹116.09`** | **`+₹483.08`** | **`+₹361.71`** | **`+₹1.68`** | `-₹66.46` | **`+₹340.07`** | **`₹31,236.16`** | **`+₹1,236.16 (+4.12%)`** | **`+₹954.82 (+3.18%)`** | **`+2.52%`** | **`+₹30.90/trd`** | **`77.5%` (31W/9L)** | **`5 / 6 (83.3%)`** |
+### 2. Market Baseline Comparison (`Oct 26` – `Nov 02`)
+During this 6-session window, the underlying 10-stock NSE universe experienced a broad bullish tailwind:
+- **Equal-Weighted Buy-and-Hold across Active Traded Universe** (`TATASTEEL +5.1%`, `TRENT +6.4%`, `ZOMATO +5.6%`, `HINDALCO +3.0%`, `BEL +2.0%`, `SBIN +2.3%`, `ITC -0.9%`, `COALINDIA -1.6%` from Oct 26 open to Nov 02 close): **`~+2.74%` unlevered (`1.0x`)**.
+- **Implication**: Because Tracks A (`+2.02%`) and B (`+1.38%`) are long-only and carry ~40–50% time-in-market cash exposure, their positive 6-day return cannot yet be separated from the rising-market beta. Only a multi-month out-of-sample run across flat and declining NSE regimes (and comparison against a random-entry / matched-exit baseline) can isolate true microstructure alpha.
 
-> **Why `v3.2.0` (15:14:00 IST Closing Momentum Auto-Squareoff) Sealed 4/4 Consecutive Green Sessions (Gao et al. 2018)**:
-> 1. **Late Institutional TWAP/VWAP Momentum Harvest**: Gao, Han, Li & Zhou (2018) established that institutional algorithmic orders execute their heaviest directional volume in the final 30 minutes (`15:00–15:30 IST`), creating a strong monotonic continuation effect. Exiting prematurely at `15:05:00 IST` cut winners right at the consolidation dip. Extending to **`15:14:00 IST`** allowed `HINDALCO` on Oct 29 to surge from `886.25` (`-₹8.39` loss) into deep executable Bid depth at `888.30` (`489` shares, `+₹14.60` profit), lifting Track B Harvester to **`4/4` consecutive profitable market sessions (`+1.43%`)**.
-> 2. **Pre-RMS Liquidity Peak & Zero Penalty Shield**: Indian retail equity brokers (Zerodha, AngelOne, Upstox) trigger automated MIS RMS liquidations between `15:15:00` and `15:20:00 IST`, imposing a ₹50+GST charge and causing market makers to widen spreads significantly. By exiting at exactly **`15:14:00 IST`**, DeltaUno captures maximum top-of-book depth with minimal spread slippage (`0.20` spread) and zero broker RMS fees across all 3 tracks.
-
-### 2. 30-Day Synthetic Multi-Regime Benchmark (`568,819` L2 Ticks)
-
-| Strategy Track | Core Mechanics | 30-Day Ending Equity (`₹10,000` Start) | Net Return | Completed Trades | Win Rate | Profit Factor | Max Intraday Drawdown | Kill-Switch Trips |
-| :--- | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **Track A: High-Yield Compounder** | Dynamic daily equity compounding (`1.2%` risk / `50%` notional), morning + afternoon institutional windows, `OFI >= 0.50`, `Bid/Ask Depth >= 1.35x` | **₹12,239.89** | **+22.40%** | 24 (21W / 3L) | **87.50%** | **16.32** | ₹105.29 (0.88%) | **0 / 30** |
-| **Track B: L2 Microstructure Harvester** | Progressive 3-stage stop ratchet + `OFI_EXHAUSTION_PROFIT_HARVEST` when L2 buying pressure flips negative in profit | **₹10,607.79** | **+6.08%** | 61 (48W / 13L) | **78.69%** | **2.72** | ₹125.53 (1.20%) | **0 / 30** |
-
----
-
-## ☁️ Automated Live NSE Paper Trading (GitHub Actions + Dual-Broker Failover + Google Sheets v2.5)
-
-DeltaUno runs a cloud-automated **3-Track Live Paper-Shadow Pipeline** every weekday (`Mon–Fri`) during NSE market hours (`09:15–15:30 IST`):
-
-1. **Zero-Delay `09:05 AM IST` Auto-Launch Architecture** ([`.github/workflows/live_paper_trading.yml`](file:///d:/personal-proj/DeltaUno/.github/workflows/live_paper_trading.yml) & [`scripts/trigger_github_session.py`](file:///d:/personal-proj/DeltaUno/scripts/trigger_github_session.py)):
-   - Combines **3 staggered off-minute GitHub Actions crons** (`13 3`, `27 3`, `42 3` UTC — avoiding `:00`/`:30` global cron congestion), a local **Windows Task Scheduler `workflow_dispatch` trigger** at `09:05 AM IST` (guaranteeing instant `<10s` VM boot before `09:15 AM`), and an automated **duplicate-session guard** that skips backup crons once a runner is active.
-2. **Dual-Broker L2 Hot-Failover & Keep-Alive Orchestrator** ([`scripts/run_live_paper_trading.py`](file:///d:/personal-proj/DeltaUno/scripts/run_live_paper_trading.py)):
-   - Uses **AngelOne SmartAPI** (with automated RFC 6238 TOTP login) as Primary L2 feed (`~195 ms` poll latency) and **Upstox API v2** as Hot-Standby Secondary (`~206 ms` poll latency via persistent TLS `HTTPSConnection` keep-alive pooling), automatically failing over mid-session if 3 consecutive polls fail.
-   - Polls 5-level L2 order book depth across **10 liquid NSE F&O equities** — 5 core large-caps (`TATASTEEL`, `SBIN`, `ITC`, `COALINDIA`, `ZOMATO`) + 5 High-Beta Nifty 50 / Next 50 momentum leaders (`TATAMOTORS`, `BEL`, `TRENT`, `DLF`, `HINDALCO`, grounded in Gao, Han, Li & Zhou 2018 §4.3) — plus the **`NIFTY 50` Macro Regime Index** (`99926000` / `NSE_INDEX|Nifty 50`) in a single batched HTTP call (`~190 ms` latency).
-3. **C++20 `--live-tail` 3-Track Streaming Engine** ([`include/deltauno/market/csv_feed.hpp`](file:///d:/personal-proj/DeltaUno/include/deltauno/market/csv_feed.hpp) & [`src/main.cpp`](file:///d:/personal-proj/DeltaUno/src/main.cpp)):
-   - Tails the live CSV stream in real time with `std::streampos` mid-line rewind protection, processes every tick across **Track A (`COMPOUNDER`)**, **Track B (`HARVESTER`)**, and **Track C (`OMNI`)**, and emits structured `[LIVE_EVENT] {...}` JSON payloads on every `BUY`, `SELL`, `SHORT`, and `COVER` fill.
-4. **Google Sheets v2.5 3-Track Command Center & Native SVG Sidebar** ([`scripts/google_sheets_live_bridge.gs`](file:///d:/personal-proj/DeltaUno/scripts/google_sheets_live_bridge.gs)):
-   - Automatically fetches each track's prior closing equity on startup (`GET ?action=get_state`) for seamless multi-day compounding across sessions.
-   - Streams `TRADE_FILL` (`BUY`/`SELL`/`SHORT`/`COVER`), 60-second `HEARTBEAT`, and end-of-day `DAILY_SUMMARY` events into 4 synchronized tabs: **`Live_Dashboard`**, **`Live_Trades`**, **`Daily_Summary`**, and **`Analytics_Charts`** (featuring 4 KPI scorecards, native sparklines, interactive dropdown filters, and a CSP-safe docked **3-Track Vector SVG Sidebar**).
+### 3. Honest Assessment of Strategy Shape, Architecture & Costs
+1. **Leverage vs. Signal Quality (`Track C`)**: Track C's headline `+8.96%` return is driven roughly `2.15x` by MIS intraday leverage (`1.80%` risk per slot). Scaled to the same `1.0x` cash basis as Tracks A and B, Track C returned **`+4.17%`**, and roughly `86%` of its gross profit came from four large trend captures (`ITC` Short `+₹221.30`, `ZOMATO` Long `+₹227.44`, `ITC` Long `+₹321.58`, `HINDALCO` Long `+₹131.51`).
+2. **Negative Win/Loss Payoff Ratio in `Track B`**: While Track B (`HARVESTER`) has a `73.3%` win rate (`11W/4L`), its **average win (`+₹32.50`) is smaller than its average loss (`-₹54.85`, R:R `0.59`)** because early profit harvesting (`+0.55%` floor) caps winners while full stop-outs hit `-0.55%` plus adverse slippage and taxes. A drop in win rate below `63%` out-of-sample will turn Track B net-negative.
+3. **Brokerage Sensitivity (`Kotak Neo ₹0 API` vs. `0.03%` Discount Broker)**:
+   - The C++ `PaperBroker` ([`paper_broker.hpp`](file:///d:/personal-proj/DeltaUno/include/deltauno/execution/paper_broker.hpp#L224-L230)) models **statutory exchange/government taxes only** (`STT 0.025%` sell + `NSE 0.00297%` + `SEBI 0.0001%` + `18% GST` + `Stamp 0.003%` buy = `~₹3.52` per `₹10k` round-trip).
+   - On standard discount brokers charging `0.03%` per leg (`+₹6.19` to `+₹8.78` brokerage + GST per round-trip), Track B loses **`67%` of its net profit** (`+₹138.12` → `+₹45.27`).
+   - Routing via **Kotak Neo Trade API v2** (`neo-fin-key: neotradeapi`) charges **`₹0` brokerage on API orders**, matching the statutory-only model — provided **both entry and exit (`15:14 IST`) are executed via the API** (manual exits clicked in the mobile app after 30 days incur `₹10`/order, and broker RMS square-offs after `15:15 IST` incur `₹50 + GST`).
+4. **Engineering Bottleneck vs. C++ Hot Path**:
+   - The C++20 engine processes ticks in `< 2 µs` via lock-free SPSC ring buffers, and the `184` CTest assertions verify **software correctness** (accounting identities, `Tick[t+1]` matching, state recovery).
+   - However, in live cloud paper trading, quotes arrive via a **`1.0s` Python REST poll (`~190–210 ms` HTTP latency from GitHub Actions to Indian broker endpoints)**. The C++ nanosecond hot path is not the bottleneck; network geography and `1s` REST sampling are. Moving to a Mumbai VPS with persistent WebSocket streaming is required before any live micro-capital deployment.
+5. **30-Day Synthetic Dataset (`data/historical_30days_nse.csv`)**:
+   - The 30-day synthetic benchmark (`568,819` ticks; Track A `+22.40%`, PF `16.32`; Track B `+6.08%`, PF `2.72`) is a **software stress test** generated by `scripts/generate_30day_data.py`. It tests multi-day state rollover and kill-switch logic, **not** real market edge.
 
 ---
 
-## 📚 Grounded in Quantitative Research (10 Peer-Reviewed Works)
+## 🧪 Out-of-Sample Validation Protocol & Pass/Fail Criteria
 
-| # | Academic Research Paper | Authors, Venue & Year | How DeltaUno Implements / Compares |
+To evaluate whether DeltaUno possesses genuine statistical edge net of costs:
+1. **Strict Parameter Freeze**: No modifications to `include/deltauno/strategy/momentum_breakout.hpp`, `include/deltauno/risk/risk_manager.hpp`, or `config/risk_limits.json` during the OOS collection window starting **`2026-11-02`**.
+2. **Sample Size Requirement**: Collect **`>= 60` consecutive live NSE sessions** or **`>= 100` out-of-sample trades per track** (`LIVE_OOS` provenance tag only).
+3. **Pre-Committed Pass/Fail Rule (Evaluated at `N = 100` OOS Trades per Track)**:
+   - **Pass Criterion 1 (Net Expectancy after All Costs)**: `1.0x` leverage-normalized net expectancy `> +₹10.00 / trade` (`> +0.10% / trade`) after statutory taxes and target broker commission.
+   - **Pass Criterion 2 (Baseline Outperformance)**: Outperforms both (a) equal-weighted intraday buy-and-hold (`09:35 IST` buy to `15:14 IST` sell) on the 10-stock universe and (b) time-matched random entries using identical `-0.85% / -0.55%` stops and `15:14 IST` exits.
+   - **Pass Criterion 3 (Max Drawdown)**: Maximum cumulative peak-to-trough equity drawdown `<= 6.0%` (`₹600` on `₹10,000` at `1.0x` leverage).
+
+---
+
+## 📚 Academic Literature Context (Inspirations vs. Implementation Differences)
+
+Literature references below motivate the feature forms used in the engine; **citing a paper does not validate the specific thresholds or parameters chosen in DeltaUno**:
+
+| # | Academic Paper | What the Paper Actually Shows | How DeltaUno Adapts It (and Where It Diverges) |
 | :---: | :--- | :--- | :--- |
-| **1** | **The Price Impact of Order Book Events** | Cont, Kukanov & Stoikov (*J. Financial Econometrics*, 2014) | **Adopted — Multi-Level Depth OFI**: Measures weighted queue pressure ($\Delta \text{Bid}_m - \Delta \text{Ask}_m$) across top-5 NSE L2 levels normalized by book depth ($R^2 \approx 65\%$) for both Long breakouts and Short breakdowns. |
-| **2** | **Deep Order Flow Imbalance** | Kolm, Turiel & Westray (*Mathematical Finance*, 2023) | **Adapted — Multi-Horizon Blend**: Combines stationary level weights (`{1.0, 0.7, 0.5, 0.35, 0.25}`) with multi-horizon decay ($0.5\,\text{OFI}_1 + 0.3\,\text{OFI}_5 + 0.2\,\text{OFI}_{20}$) using auditable fixed weights instead of opaque neural layers. |
-| **3** | **DeepLOB: Deep CNNs for Limit Order Books** | Zhang, Zohren & Roberts (*IEEE Trans. Signal Processing*, 2019) | **Deliberate Divergence — Zero Black-Box Drift**: Rejects GPU-heavy CNN-LSTM weights prone to regime overfitting in favor of 100% explainable analytical OFI + deterministic pre-trade gates. |
-| **4** | **The Micro-Price: High-Frequency Estimator** | Sasha Stoikov (*Quantitative Finance*, 2018) | **Adopted — Queue-Weighted Fair Value & VWAP Shield**: Requires `weighted_mid_price >= mid_price` and `best_bid >= VWAP` for Longs, and `weighted_mid_price <= mid_price` and `best_ask <= VWAP` for Shorts. |
-| **5** | **Market Intraday Momentum** | Gao, Han, Li & Zhou (*J. Financial Economics*, 2018) | **Adopted — `09:35 AM` Opening Settlement & `15:14:00 IST` Closing Institutional Momentum Auto-Squareoff**: Waits 20 minutes for opening auction noise to settle; extends auto-squareoff to `15:14:00 IST` to ride late institutional TWAP/VWAP closing momentum while liquidity depth is highest prior to retail broker RMS squareoff (`15:15–15:20 IST`), flipping Oct 29 `HINDALCO` to `+₹14.60` profit (surging to `889.85`). In Track C (`OMNI`), enforces a `1.25x` High-Conviction Midday Tier (`11:15–13:15 IST`). |
-| **6** | **Flow Toxicity and Liquidity in an HFT World** | Easley, López de Prado & O'Hara (*Rev. Financial Studies*, 2012) | **Mitigated — L1 Executable Liquidity & Shock Shields**: Vetoes toxic 1-share L1 quote stubs (`best_ask_qty / best_bid_qty >= 50`), enforces Macro Event Freeze (RBI/Budget/FOMC), `1.5%` Circuit Band Guard, and a `50%` cash reserve per slot. |
-| **7** | **About the Risks of Social & Copy-Trading** | Pelster & Hofmann (*J. Banking & Finance*, 2018) | **Countered — "BS Detector" & Asymmetric Break-Even Ratchet**: Vetoes external webhooks when local `OFI < 0.20` or price pumped `> 2%`; uses a `+0.90%` Long / `+0.45%` Short break-even trigger (locking `+0.15%` net of taxes) so winners run while losers are cut mechanically. |
-| **8** | **Attention-Induced Trading and Returns** | Barber, Huang, Odean & Schwarz (*Journal of Finance*, 2022) | **Countered — Anti-Herding Guard**: Restricts universe to 5 ultra-liquid Nifty large-caps, blocks `> 4.0x` volume-climax spikes, and enforces a 45-minute per-symbol post-exit cooldown. |
-| **9** | **Optimal Execution of Portfolio Transactions** | Almgren & Chriss (*Journal of Risk*, 2000) | **Adopted — Top-of-Book Liquidity Gate, Adverse Slippage & Fee Gate**: Blocks entries when top-of-book depth `< 50` shares to prevent non-linear market-order sweep slippage on `Tick[t+1]`, and vetoes setups with `Expected Gain < 2.5x Statutory Fees`. |
-| **10** | **Time Series Momentum** | Moskowitz, Ooi & Pedersen (*J. Financial Economics*, 2012) | **Adopted — Dual-Slot (`1 Long + 1 Short`) Book & Volatility Sizing**: Runs independent Long and Short slots in Track C (`OMNI`) scaled inversely to stop distance (`<= 1.20%` risk per trade), capturing cross-sectional dispersion on choppy days. |
-
-### Academic References Cited
-1. Cont, R., Kukanov, A., & Stoikov, S. (2014). *The Price Impact of Order Book Events*. Journal of Financial Econometrics, 12(1), 47–88.
-2. Kolm, P. N., Turiel, J., & Westray, N. (2023). *Deep Order Flow Imbalance: Extracting Alpha at Multiple Horizons from the Limit Order Book*. Mathematical Finance, 33(4), 1044–1081.
-3. Zhang, Z., Zohren, S., & Roberts, S. (2019). *DeepLOB: Deep Convolutional Neural Networks for Limit Order Books*. IEEE Transactions on Signal Processing, 67(11), 3001–3012.
-4. Stoikov, S. (2018). *The Micro-Price: A High-Frequency Estimator of Future Prices*. Quantitative Finance, 18(12), 1959–1966.
-5. Gao, L., Han, Y., Li, S. Z., & Zhou, G. (2018). *Market Intraday Momentum*. Journal of Financial Economics, 129(2), 394–414.
-6. Easley, D., López de Prado, M. M., & O'Hara, M. (2012). *Flow Toxicity and Liquidity in a High-Frequency World*. Review of Financial Studies, 25(5), 1457–1493.
-7. Pelster, M., & Hofmann, A. (2018). *About the Risks of Social Trading: Copy-Trading and the Disposition Effect*. Journal of Banking & Finance, 94, 75–88.
-8. Barber, B. M., Huang, X., Odean, T., & Schwarz, C. G. (2022). *Attention-Induced Trading and Returns: Evidence from Robinhood Users*. Journal of Finance, 77(6), 3141–3190.
-9. Almgren, R., & Chriss, N. (2000). *Optimal Execution of Portfolio Transactions*. Journal of Risk, 3(2), 5–39.
-10. Moskowitz, T. J., Ooi, Y. H., & Pedersen, L. H. (2012). *Time Series Momentum*. Journal of Financial Economics, 104(2), 228–250.
+| **1** | **Cont, Kukanov & Stoikov (2014)**, *The Price Impact of Order Book Events*, JFE | Contemporaneous 10-second price changes are linearly related to top-of-book Order Flow Imbalance ($R^2 \approx 65\%$ in-interval, not a 15-minute ahead forecast). | **Heuristic Extension**: Computes 5-level depth-weighted OFI (`{1.0, 0.7, 0.5, 0.35, 0.25}`) as an entry confirmation filter alongside price/VWAP breakouts rather than a standalone multi-minute return predictor. |
+| **2** | **Kolm, Turiel & Westray (2023)**, *Deep Order Flow Imbalance*, Math. Finance | Multi-horizon L2 OFI vectors trained with deep neural networks predict short-horizon mid-price returns across sub-second/second horizons. | **Simplified Linear Proxy**: Replaces trained neural networks with a fixed 3-horizon weighted average ($0.5\,\text{OFI}_1 + 0.3\,\text{OFI}_5 + 0.2\,\text{OFI}_{20}$) over 1-second REST snapshots. |
+| **3** | **Zhang, Zohren & Roberts (2019)**, *DeepLOB*, IEEE TSP | CNN-LSTM architectures extract spatial-temporal features from raw L2 limit order books. | **Deliberate Non-Adoption**: Avoids deep neural weights on small sample sizes; uses fixed analytical book ratios instead. |
+| **4** | **Stoikov (2018)**, *The Micro-Price*, Quantitative Finance | Queue-imbalance-adjusted micro-price is a better short-term fair-value estimator than simple mid-price. | **Direct Adoption**: Requires `weighted_mid_price >= mid_price` for Longs and `<= mid_price` for Shorts. |
+| **5** | **Gao, Han, Li & Zhou (2018)**, *Market Intraday Momentum*, JFE | First-30-minute S&P 500 ETF return predicts the **last-30-minute (`15:00–15:30`) market-index return** driven by late institutional rebalancing. | **Operational Adaptation**: Applies the first-30-minute directional filter (`r_{30m}`) to individual high-beta stocks in Track C (`OMNI`), and sets intraday auto-squareoff at **`15:14:00 IST`** primarily to exit 1 minute before Indian broker MIS RMS auto-liquidation (`15:15 IST`, which carries a ₹50+GST penalty). |
+| **6** | **Easley, López de Prado & O'Hara (2012)**, *Flow Toxicity and Liquidity*, RFS | Volume-synchronized probability of informed trading (VPIN) measures adverse selection in high-frequency order flow. | **Coarse Operational Proxy**: Does not compute VPIN; instead blocks entries during scheduled macro announcements (`calendar_events.json`) and within `1.5%` of NSE circuit bands. |
+| **7** | **Pelster & Hofmann (2018)**, *About the Risks of Social Trading*, JBF | Retail copy-traders suffer from a stronger disposition effect (holding losers, selling winners early). | **Design Motivation Only**: Motivates mechanical stop-loss / break-even ratchets (`+0.90%` Long / `+0.45%` Short trigger) and sanity-checking external webhook alerts against local book imbalance (`signal_ingestor.hpp`). |
+| **8** | **Barber, Huang, Odean & Schwarz (2022)**, *Attention-Induced Trading*, JoF | Retail investors herd into attention-grabbing stocks experiencing extreme volume/price spikes, earning negative subsequent returns. | **Heuristic Guard**: Blocks entries when single-tick volume exceeds `4.0x` rolling average or price has already jumped `> 2.0%`, plus a 45-minute per-symbol cooldown. |
+| **9** | **Almgren & Chriss (2000)**, *Optimal Execution of Portfolio Transactions*, J. Risk | Models temporary and permanent market impact costs under risk aversion. | **Simplified Slippage & Liquidity Filter**: Models execution cost as opposite-side best bid/ask fill on `Tick[t+1]` plus depth-sweep penalty when `order_qty > top_book_qty`, and requires `L1 Qty >= 50` shares. |
+| **10** | **Moskowitz, Ooi & Pedersen (2012)**, *Time Series Momentum*, JFE | Volatility-scaled cross-asset monthly time-series momentum (`1–12` month horizons). | **Intraday Adaptation**: Uses volatility/stop-distance inverse position sizing (`RiskCap / |Entry - SL|`) and independent Long + Short slots in Track C. |
 
 ---
 
-## 🛡️ The 14 Institutional Risk & Operational Safeguards
+## 🛡️ Implemented Engine Controls (Verified by CTest Suite)
 
-1. **Symmetric Long & Short Fixed-Risk Position Sizing**:
-   $$\text{Quantity} = \min\left(\left\lfloor \frac{\text{RiskCap}}{|\text{Entry} - \text{SL}|} \right\rfloor, \left\lfloor \frac{\text{NotionalCap}}{\text{Entry}} \right\rfloor\right)$$
-   *(Dynamically compounded at `1.2%` risk / `50%` notional of current session equity).*
-2. **Top-of-Book L1 Executable Liquidity Gate (Almgren & Chriss 2000)**: Requires `best_ask_qty() >= 50` for Long entries and `best_bid_qty() >= 50` for Short entries, preventing adverse market-order sweeps against 1-share L1 quote stubs.
-3. **NIFTY 50 Macro Regime Shield**: Automatically blocks new Long entries across all tracks when the live `NIFTY 50` index drops `<= -0.35%` below its session open while continuing to allow Track C `SHORT` breakdowns.
-4. **Daily Drawdown Kill-Switch**: Hard cutoff disables new entries if intraday net or peak-to-trough drawdown reaches **₹500.00 (5%)**, with automatic reset on IST day rollover.
-5. **Asymmetric Zero-Loss Break-Even & Progressive Multi-Stage Trailing**: Ratchets Stop Loss to `Entry ± 0.15%` (covering all statutory taxes) once unrealized profit reaches `+0.90%` on Longs (`+0.45%` on Shorts), with progressive 3-stage profit locking in Track B.
-6. **Institutional Closing Momentum Auto-Squareoff Shield (Gao et al. 2018)**: Forcibly exits all open Long and Short intraday positions at **15:14:00 IST**, capturing peak institutional closing momentum and top-of-book executable liquidity while strictly preceding retail broker RMS auto-squareoff penalties (`15:15–15:20 IST`).
-7. **Circuit Band Guard**: Vetoes entries within **1.5%** of Upper or Lower Circuit limits in both strategy and `RiskManager`.
-8. **Opening Range Settlement (`09:35 AM IST`) & Time-of-Day Filter**: Blocks entries during the noisy `09:15–09:35 IST` opening auction discovery window; Track C (`OMNI`) trades `09:35–14:45 IST` continuously with a `1.25x` High-Conviction Midday Tier (`11:15–13:15 IST`).
-9. **Zero Look-Ahead Bias**: Orders submitted on $\text{Tick}[t]$ match strictly on $\text{Tick}[t+1]$ (`timestamp_ns > created_time_ns`) at opposite book prices (`best_ask` for `BUY`/`COVER`, `best_bid` for `SELL`/`SHORT`), guarded by an explicit `FLAT → PENDING_ENTRY → OPEN → PENDING_EXIT` state machine.
-10. **Atomic Crash Recovery Journal**: Writes open position state via `.tmp` + atomic rename (`deltauno_state.json`) and restores `Position`, `RiskManager`, `PaperBroker`, and `Watchdog` on startup.
-11. **Lock-Free Async Logger**: Bounded MPMC ring-buffer logger formats timestamps off the hot thread using C++20 atomic wait/notify (`deltauno.log`).
-12. **Dual-Mode Network Watchdog**: Monitors live `steady_clock` stalls and deterministic replay tick-timestamp gaps ($> 5\text{s}$) whenever a position is open.
-13. **Macro Event Freeze**: Precomputes UTC nanosecond windows from `config/calendar_events.json` to block entries during RBI, Union Budget, or FOMC announcements in $O(1)$ integer comparisons.
-14. **Symmetric Long/Short Statutory Tax Pre-Check & Post-Trade Auditor**: Pre-calculates NSE MIS charges (`0.025%` STT on the sell leg — exit for Longs, entry for Shorts — plus NSE turnover `0.00297%`, `18%` GST, `0.003%` stamp duty on the buy leg, and `0.0001%` SEBI fees) and tracks tick-by-tick MAE/MFE across all 3 tracks.
+The 9 CTest suites (`184` assertions) verify that the C++20 engine deterministically enforces the following rules:
+1. **Fixed-Risk Position Sizing**: $\text{Qty} = \min(\lfloor \text{RiskCap} / |\text{Entry} - \text{SL}| \rfloor, \lfloor \text{NotionalCap} / \text{Entry} \rfloor)$.
+2. **Top-of-Book L1 Liquidity Filter**: Requires `best_ask_qty() >= 50` for Longs and `best_bid_qty() >= 50` for Shorts.
+3. **NIFTY 50 Macro Regime Filter**: Blocks new Long entries when `NIFTY 50 <= -0.35%` on the day.
+4. **Daily Drawdown Kill-Switch**: Halts new entries if intraday net or peak-to-trough drawdown reaches **₹500.00 (5%)**.
+5. **Break-Even Stop Ratchet**: Moves stop loss to `Entry ± 0.15%` once unrealized gain reaches `+0.90%` (Long) or `+0.45%` (Short).
+6. **15:14:00 IST Auto-Squareoff & Pre-`#SESSION_END` Runner Guard**: Flattens all open intraday positions at `15:14:00 IST` (1 minute before `15:15 IST` broker RMS square-off), backed by a Python `finally:` safety net if a cloud runner exits early.
+7. **Circuit Band Guard (`1.5%`) & Macro Event Freeze**: Blocks entries near upper/lower circuits or during scheduled RBI/Budget/FOMC windows.
+8. **Zero Look-Ahead Bias (`Tick[t+1]` Matching)**: Orders created on `Tick[t]` fill strictly on `Tick[t+1]` (`timestamp_ns > created_time_ns`) at the opposite side of the book (`best_ask` for `BUY`/`COVER`, `best_bid` for `SELL`/`SHORT`).
+9. **Atomic Crash Recovery (`deltauno_state.json`)**: Persists open position state via `.tmp` + rename.
 
 ---
 
 ## 🏷️ Release History & Semantic Versioning Tags
 
-All milestone releases are tagged in Git following Semantic Versioning (`vMAJOR.MINOR.PATCH`):
-
-| Git Tag | Commit | Release Highlights |
+| Git Tag | Commit | Release Summary |
 | :--- | :---: | :--- |
-| **`v3.2.0`** | `HEAD` | **15:14:00 IST Institutional Closing Momentum Auto-Squareoff Shield Upgrade (Gao et al. 2018)**: Replaces premature `15:05:00` cutoff with `15:14:00 IST` across all 3 tracks to ride late institutional TWAP/VWAP execution waves before broker RMS liquidation (`15:15–15:20`). Verified across 4-day recorded NSE dataset (`351,856` ticks): Track B Harvester achieves **`4/4` consecutive green days (`₹10,142.62 / +1.43%`)**, Track C Omni reaches **`₹10,713.44 (+7.13%)`**, Track A reaches **`₹10,106.49 (+1.06%)`**, and Combined Portfolio achieves **`₹30,962.55 (+3.21%)`**. |
-| **`v3.1.1`** | `58de41d` | **100% Cloud-Native `09:05 AM IST` Google Apps Script Auto-Launcher & 10-Min Morning Watchdog**: Desktop-independent Google Cloud time-driven triggers (`autoMorningGitHubDispatch` + `cloudMorningWatchdog`) and encrypted `ScriptProperties` GitHub PAT provisioning. |
-| **`v3.1.0`** | `10f7fd3` | **Capital Acceleration Upgrade (`2.15x` MIS Risk-Scaled Omni Compounding, Harvester v3.1 R:R Overhaul & 10-Symbol High-Beta NSE F&O Universe)**: Cross-day dynamic compounding loop (`comp_mult`), Track C (`OMNI`) `1.80%` risk / `2.15x` MIS sizing (`₹10,680.03` / `+6.80%`), Track B (`HARVESTER`) `+0.55%` harvest floor & `-0.55%` SL (`₹10,091.13` / `+0.91%`, `3/3` green days), and 5 High-Beta NSE F&O leaders (`TATAMOTORS`, `BEL`, `TRENT`, `DLF`, `HINDALCO`). |
-| **`v3.0.0`** | `13572e4` | **Literature-Backed 3-Track Architecture (`Track A Compounder` + `Track B Harvester` + `Track C Bi-Directional Omni`)**: Dual-Slot (`1 Long + 1 Short`) book, Almgren-Chriss L1 liquidity gate (`>= 50` shares), Gao-Moskowitz intraday TSMOM short filter, and 3-day NSE replay (`+3.13%`, `100% WR`). |
-| **`v2.5.0`** | `21a4201` | **Bi-Directional Intraday Short Selling (`Side::SELL` / `COVER`) & Google Sheets v2.5 3-Track Studio**: Symmetric short-selling broker/risk engine, `09:05 AM IST` 3-layer auto-launcher, and AngelOne ⇄ Upstox L2 hot-failover. |
-| **`v2.2.0`** | `1c5b2bf` | **Google Sheets v2.2 Native Interactive Studio & Zero-Dependency SVG Sidebar**: Multi-day compounding equity persistence (`GET ?action=get_state`), in-cell dropdowns, sparklines, and CSP-safe SVG sidebar. |
-| **`v2.0.0`** | `b008bb2` | **Live NSE Cloud Paper Trading & Dual-Mode Engine (`--mode both` + `--live-tail`)**: GitHub Actions cloud runner, AngelOne/Upstox L2 poller, and Google Sheets live telemetry bridge. |
-| **`v1.0.0`** | `36e3aad` | **Core C++20 Lock-Free L2 Engine & 184-Assertion E2E Master Suite**: SPSC/MPMC ring buffers, 5-level L2 order book, Cont/Kolm OFI, 13 risk shields, and 4-tier E2E verification suite. |
-
----
-
-## 📂 Project Structure
-
-```text
-DeltaUno/
-├── CMakeLists.txt                       # C++20 build & 9-suite CTest configuration (incl. 184-test E2E suite)
-├── README.md                            # Master architecture, research matrix, release tags & usage guide
-├── TEST_INFRA.md                        # 4-Tier 184-test E2E verification specification
-├── TEST_READY.md                        # E2E test sign-off & compliance report
-├── .github/
-│   └── workflows/
-│       └── live_paper_trading.yml       # Staggered 3-cron + workflow_dispatch cloud live paper trading workflow
-├── config/
-│   ├── risk_limits.json                 # ₹10,000 capital limits, 09:35 IST windows & strategy parameters
-│   ├── instruments.json                 # Whitelist of 5 liquid NSE stocks (₹0.05 tick)
-│   ├── calendar_events.json             # Macro event freeze schedule (RBI, Budget, FOMC)
-│   └── live_broker.env.example          # Template for broker & Google Sheets environment variables
-├── docs/
-│   ├── financial_governance_approval.md # Executive risk & capital sign-off charter
-│   ├── implementation_plan.md           # Detailed system design & verification spec
-│   └── walkthrough.md                   # Build, CTest, 3-track replay & live cloud verification report
-├── include/
-│   └── deltauno/
-│       ├── core/
-│       │   ├── types.hpp                # Fixed-point Price, 5p tick helpers, POD structs
-│       │   ├── ring_buffer.hpp          # Cache-aligned lock-free SPSC & MPMC queues
-│       │   ├── async_logger.hpp         # Lock-free MPMC async logger (off-thread formatting)
-│       │   ├── state_journal.hpp        # Atomic .tmp + rename crash recovery journal
-│       │   └── config_loader.hpp        # Runtime JSON loader & IST civil-time converter
-│       ├── market/
-│       │   ├── order_book.hpp           # 5-level L2 book, OFI, bid/ask & ask/bid depth ratios, microprice
-│       │   ├── feed_interface.hpp       # Market feed & external alert callback interfaces
-│       │   ├── csv_feed.hpp             # Deterministic replay & real-time --live-tail streaming feed
-│       │   └── watchdog.hpp             # Dual-mode steady-clock & tick-gap watchdog
-│       ├── strategy/
-│       │   ├── strategy_interface.hpp
-│       │   ├── momentum_breakout.hpp    # 3-Track (COMPOUNDER, HARVESTER, OMNI Long+Short) engine
-│       │   └── signal_ingestor.hpp      # JSON webhook parser & L2 "BS Detector"
-│       ├── risk/
-│       │   └── risk_manager.hpp         # All 14 pre-trade & open-position risk shields (Long & Short)
-│       └── execution/
-│           ├── execution_interface.hpp
-│           ├── paper_broker.hpp         # Tick[t+1] matching, Long/Short slippage, MIS taxes & MAE/MFE
-│           └── trade_auditor.hpp        # Exact PnL identity & multi-track comparison auditor
-├── src/
-│   └── main.cpp                         # 3-Track lock-free SPSC pipeline, Dual-Slot Omni & [LIVE_EVENT] streamer
-├── data/
-│   ├── historical_30days_nse.csv        # 30-session (568,819-tick) realistic NSE L2 dataset
-│   ├── sample_nse_ticks.csv             # Deterministic single-session NSE momentum breakout L2 stream
-│   └── chop_ticks.csv                   # Sideways rangebound noise dataset
-├── scripts/
-│   ├── run_live_paper_trading.py        # AngelOne ⇄ Upstox hot-failover L2 orchestrator & Sheets streamer
-│   ├── trigger_github_session.py        # Local 09:05 AM IST workflow_dispatch auto-launcher
-│   ├── register_morning_scheduler.ps1   # Windows Task Scheduler registration script
-│   ├── google_sheets_live_bridge.gs     # Google Apps Script v2.5 3-Track Command Center & SVG Sidebar
-│   ├── generate_30day_data.py           # 30-session multi-symbol NSE L2 generator
-│   └── generate_nse_ticks.py            # Seeded NSE ₹0.05-tick scenario generator
-└── tests/
-    ├── test_macros.hpp                  # Release-safe (-DNDEBUG) test assertion macros
-    ├── test_order_book.cpp              # L2 depth, OFI, circuit & SPSC concurrency tests
-    ├── test_signal_ingestor.cpp         # Webhook JSON & BS Detector veto unit tests
-    ├── test_risk_manager.cpp            # Sizing, drawdown, rollover, windows & macro tests
-    ├── test_state_journal.cpp           # Atomic WAL crash recovery & Watchdog tests
-    ├── test_paper_broker.cpp            # Tick[t+1], Long & Short round-trip, slippage, taxes & MAE/MFE tests
-    ├── test_trade_auditor.cpp           # Exact PnL identity & scratch-trade audit tests
-    ├── test_momentum_strategy.cpp       # Microstructure strategy & VWAP filter tests
-    ├── test_adversarial_m3.cpp          # Adversarial drawdown progression & kill-switch tests
-    └── e2e/
-        └── run_e2e_tests.py             # 184-test 4-Tier End-to-End verification suite
-```
+| **`v3.3.0`** | `HEAD` | **Parameter Freeze, Provenance Tagging (`REPLAY_V3.2` vs `LIVE_OOS`), Kotak Neo `₹0` API Support & `15:14 IST` Runner Fix**: Adds `1.0x` leverage-normalized returns, net expectancy (`₹/trd`), and `₹0` Kotak Neo vs `0.03%` brokerage tracking to Google Sheets; adds `--provider kotakneo` (`TOTP + MPIN` v2 API); fixes the `350m` (`15:05 IST`) GitHub Actions cutoff to `355m` (`15:15 IST`) with a pre-`#SESSION_END` auto-squareoff safety net; documents in-sample vs out-of-sample split and methodology limitations. |
+| **`v3.2.0`** | `8d37551` | **15:14:00 IST Pre-RMS Auto-Squareoff Update**: Moves engine auto-squareoff from `15:05:00` to `15:14:00 IST` across all 3 tracks (`1` minute prior to retail broker `15:15` MIS RMS liquidations). |
+| **`v3.1.1`** | `58de41d` | **Cloud-Native Morning Google Apps Script Trigger & Watchdog**: Adds Google Cloud time-driven triggers (`autoMorningGitHubDispatch` + `cloudMorningWatchdog`). |
+| **`v3.1.0`** | `10f7fd3` | **In-Sample Parameter Iteration (`2.15x` MIS Omni Sizing, Harvester `-0.55%` SL & 10-Symbol Universe)**: Expands universe to 10 NSE F&O stocks and introduces `2.15x` MIS sizing on Track C. |
+| **`v3.0.0`** | `13572e4` | **3-Track Architecture (`Track A Compounder` + `Track B Harvester` + `Track C Bi-Directional Omni`)**: Adds Dual-Slot (`1 Long + 1 Short`) book and `L1 Qty >= 50` liquidity filter. |
+| **`v2.5.0`** | `21a4201` | **Intraday Short Selling (`Side::SELL` / `COVER`) & Google Sheets v2.5 3-Track Studio**: Symmetric short-selling broker/risk engine and AngelOne ⇄ Upstox failover. |
+| **`v2.0.0`** | `b008bb2` | **Live NSE Cloud Paper Trading (`--mode both` + `--live-tail`)**: GitHub Actions runner, AngelOne/Upstox REST poller, and Google Sheets webhook bridge. |
+| **`v1.0.0`** | `36e3aad` | **Core C++20 Engine & 184-Assertion Test Suite**: SPSC/MPMC ring buffers, 5-level L2 order book, risk manager, and paper broker. |
 
 ---
 
 ## 🚀 Building & Running
 
-### Prerequisites
-- CMake 3.20+
-- C++20 compliant compiler (Clang / GCC MinGW / MSVC)
-- Python 3.9+ (standard library only; zero `pip` packages required)
-
-### Build All Targets
+### Build & Run CTest Suite (`9/9` Suites, `184` Assertions)
 ```powershell
 cmake -G "MinGW Makefiles" -B build
 cmake --build build -j 4
-```
-
-### Run Automated Test Suites (9/9 CTest Suites, 184 E2E Tests)
-```powershell
 ctest --test-dir build --output-on-failure
 ```
 
-### Run 3-Track Parallel Simulation (`--mode both`)
+### Run Offline Replay (`--mode both`)
 ```powershell
-# Default runs Track A (Compounder), Track B (Harvester), and Track C (Bi-Directional Omni) in parallel
-.\build\deltauno.exe data/historical_30days_nse.csv
-
-# Pass custom starting capital per track for multi-day compounding
-.\build\deltauno.exe data/historical_30days_nse.csv --mode both --compounder-capital 10148.51 --harvester-capital 9940.15 --omni-capital 10312.63
-
-# Run an individual strategy track
-.\build\deltauno.exe data/historical_30days_nse.csv --mode compounder
-.\build\deltauno.exe data/historical_30days_nse.csv --mode harvester
+.\build\deltauno.exe --mode both --input data/historical_30days_nse.csv --compounder-capital 10000 --harvester-capital 10000 --omni-capital 10000
 ```
 
 ### Run Live NSE Paper Trading Orchestrator
 ```powershell
-# 1. Verify live-tail streaming & 3-track execution end-to-end (offline self-test)
+# 1. End-to-end live-tail self-test
 python scripts/run_live_paper_trading.py --self-test
 
-# 2. Verify live broker API authentication & 5-symbol NSE L2 quote retrieval
-python scripts/run_live_paper_trading.py --broker angelone --test-connection
-python scripts/run_live_paper_trading.py --broker upstox --test-connection
+# 2. Test live broker L2 quote connection (auto-detects Kotak Neo, AngelOne, Upstox, Zerodha, or Yahoo)
+python scripts/run_live_paper_trading.py --provider auto --test-connection
 
-# 3. Verify live Google Sheets webhook bridge
-python scripts/run_live_paper_trading.py --test-sheets
-
-# 4. Run full NSE 3-track live paper trading session (09:15 - 15:30 IST, AngelOne Primary + Upstox Failover)
-python scripts/run_live_paper_trading.py --broker angelone --mode both
+# 3. Run full NSE session (09:15 - 15:15 IST, auto-squareoff at 15:14:00 IST)
+python scripts/run_live_paper_trading.py --provider auto --mode both
 ```
