@@ -58,6 +58,7 @@ int main(int argc, char* argv[]) {
     double omni_capital_override = 0.0;
     bool realtime_pacing = false;
     bool live_tail = false;
+    bool stdin_stream = false;
     bool emit_events = false;
     bool verbose_logs = false;
 
@@ -80,6 +81,10 @@ int main(int argc, char* argv[]) {
         } else if (arg == "--realtime") {
             realtime_pacing = true;
         } else if (arg == "--live-tail") {
+            live_tail = true;
+            emit_events = true;
+        } else if (arg == "--stdin-stream") {
+            stdin_stream = true;
             live_tail = true;
             emit_events = true;
         } else if (arg == "--emit-events") {
@@ -304,15 +309,43 @@ int main(int argc, char* argv[]) {
         }
     });
 
+    auto emit_signal_observation = [&](const char* trk_label,
+                                       const core::TradingSignal& sig,
+                                       const market::OrderBook& book,
+                                       uint64_t ts_ns,
+                                       const char* status_str,
+                                       core::Quantity qty_val) {
+        if (!(live_tail || emit_events)) return;
+        std::ostringstream sig_ss;
+        sig_ss << "\n[LIVE_EVENT] {\"type\":\"SIGNAL\",\"track\":\"" << trk_label
+               << "\",\"ts_ns\":" << ts_ns
+               << ",\"side\":\"" << (sig.side == core::Side::SELL ? "SHORT" : "BUY")
+               << "\",\"symbol\":\"" << sig.symbol
+               << "\",\"target\":" << std::fixed << std::setprecision(2) << core::to_inr(sig.target_entry)
+               << ",\"sl\":" << core::to_inr(sig.stop_loss)
+               << ",\"tp\":" << core::to_inr(sig.take_profit)
+               << ",\"ofi\":" << std::setprecision(4) << book.composite_ofi()
+               << ",\"qty\":" << qty_val
+               << ",\"status\":\"" << status_str << "\"}\n";
+        std::cout << sig_ss.str() << std::flush;
+    };
+
     auto try_submit_harv_signal = [&](const core::TradingSignal& sig,
                                       const market::OrderBook& book,
                                       uint64_t current_time_ns) {
-        if (harv_lifecycle != PositionLifecycle::FLAT) return;
+        if (harv_lifecycle != PositionLifecycle::FLAT) {
+            emit_signal_observation("HARVESTER", sig, book, current_time_ns, "SLOT_BUSY", 0);
+            return;
+        }
         const bool macro_frozen = macro_calendar.is_frozen(current_time_ns);
         const bool near_circuit = book.is_near_circuit(harv_cfg.circuit_limit_buffer_pct);
         const auto [sized_qty, rejection] =
             harv_risk_mgr.evaluate_and_size_order(sig, current_time_ns, macro_frozen, near_circuit);
-        if (rejection != risk::RiskRejection::NONE) return;
+        if (rejection != risk::RiskRejection::NONE) {
+            emit_signal_observation("HARVESTER", sig, book, current_time_ns, risk::risk_rejection_to_string(rejection), 0);
+            return;
+        }
+        emit_signal_observation("HARVESTER", sig, book, current_time_ns, "TAKEN", sized_qty);
 
         core::Order new_order{};
         new_order.client_order_id = harv_next_order_id++;
@@ -499,10 +532,17 @@ int main(int argc, char* argv[]) {
         const bool macro_frozen = macro_calendar.is_frozen(current_time_ns);
         const bool near_circuit = book.is_near_circuit(omni_cfg.circuit_limit_buffer_pct);
         if (sig.side == core::Side::BUY) {
-            if (omni_lifecycle != PositionLifecycle::FLAT) return;
+            if (omni_lifecycle != PositionLifecycle::FLAT) {
+                emit_signal_observation("OMNI", sig, book, current_time_ns, "SLOT_BUSY", 0);
+                return;
+            }
             const auto [sized_qty, rejection] =
                 omni_risk_mgr.evaluate_and_size_order(sig, current_time_ns, macro_frozen, near_circuit);
-            if (rejection != risk::RiskRejection::NONE) return;
+            if (rejection != risk::RiskRejection::NONE) {
+                emit_signal_observation("OMNI", sig, book, current_time_ns, risk::risk_rejection_to_string(rejection), 0);
+                return;
+            }
+            emit_signal_observation("OMNI", sig, book, current_time_ns, "TAKEN", sized_qty);
             core::Order new_order{};
             new_order.client_order_id = omni_next_order_id++;
             new_order.token = sig.token;
@@ -518,10 +558,17 @@ int main(int argc, char* argv[]) {
                 omni_risk_mgr.set_has_active_position(true);
             }
         } else {
-            if (omni_short_lifecycle != PositionLifecycle::FLAT) return;
+            if (omni_short_lifecycle != PositionLifecycle::FLAT) {
+                emit_signal_observation("OMNI", sig, book, current_time_ns, "SLOT_BUSY", 0);
+                return;
+            }
             const auto [sized_qty, rejection] =
                 omni_short_risk_mgr.evaluate_and_size_order(sig, current_time_ns, macro_frozen, near_circuit);
-            if (rejection != risk::RiskRejection::NONE) return;
+            if (rejection != risk::RiskRejection::NONE) {
+                emit_signal_observation("OMNI", sig, book, current_time_ns, risk::risk_rejection_to_string(rejection), 0);
+                return;
+            }
+            emit_signal_observation("OMNI", sig, book, current_time_ns, "TAKEN", sized_qty);
             core::Order new_order{};
             new_order.client_order_id = omni_next_order_id++;
             new_order.token = sig.token;
@@ -638,7 +685,11 @@ int main(int argc, char* argv[]) {
     auto try_submit_signal = [&](const core::TradingSignal& sig,
                                  const market::OrderBook& book,
                                  uint64_t current_time_ns) {
-        if (lifecycle != PositionLifecycle::FLAT) return;
+        const char* trk_lbl = primary_is_harvester ? "HARVESTER" : "COMPOUNDER";
+        if (lifecycle != PositionLifecycle::FLAT) {
+            emit_signal_observation(trk_lbl, sig, book, current_time_ns, "SLOT_BUSY", 0);
+            return;
+        }
 
         const bool macro_frozen = macro_calendar.is_frozen(current_time_ns);
         const bool near_circuit = book.is_near_circuit(risk_cfg.circuit_limit_buffer_pct);
@@ -646,9 +697,11 @@ int main(int argc, char* argv[]) {
         const auto [sized_qty, rejection] =
             active_risk_mgr.evaluate_and_size_order(sig, current_time_ns, macro_frozen, near_circuit);
         if (rejection != risk::RiskRejection::NONE) {
+            emit_signal_observation(trk_lbl, sig, book, current_time_ns, risk::risk_rejection_to_string(rejection), 0);
             LOG_DEBUG(std::string("Order rejected by RiskManager: ") + risk::risk_rejection_to_string(rejection));
             return;
         }
+        emit_signal_observation(trk_lbl, sig, book, current_time_ns, "TAKEN", sized_qty);
 
         core::Order new_order{};
         new_order.client_order_id = next_order_id++;
@@ -692,9 +745,9 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    market::CSVFeed feed(csv_path, realtime_pacing, 5, live_tail);
+    market::CSVFeed feed(csv_path, realtime_pacing, 5, live_tail, stdin_stream);
     g_active_feed_ptr = &feed;
-    LOG_INFO(std::string("Connecting to CSV Market Feed: ") + csv_path + (live_tail ? " [LIVE-TAIL MODE]" : ""));
+    LOG_INFO(std::string("Connecting to CSV Market Feed: ") + (stdin_stream ? "STDIN_PIPE" : csv_path) + (live_tail ? " [LIVE-TAIL MODE]" : ""));
 
     feed.register_callback([&](const core::MarketTick& tick) {
         while (!tick_ring->push(tick)) {

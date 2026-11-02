@@ -15,6 +15,15 @@ public:
     explicit PaperBroker(double initial_cash_inr = 10000.0)
         : cash_balance_inr_(initial_cash_inr) {}
 
+    void set_marketable_limit_bounds(core::Price max_slippage_ticks_step, uint64_t timeout_ns) noexcept {
+        marketable_limit_ticks_ = max_slippage_ticks_step;
+        order_timeout_ns_ = timeout_ns;
+    }
+
+    [[nodiscard]] size_t missed_limit_fills_count() const noexcept {
+        return missed_limit_fills_;
+    }
+
     bool place_order(const core::Order& order) override {
         if (order.quantity == 0) return false;
 
@@ -94,6 +103,29 @@ public:
             if (tick.timestamp_ns <= order.created_time_ns) {
                 remaining.push_back(order);
                 continue;
+            }
+
+            // Optional SEBI Algo Marketable-Limit Order Cap & Timeout Check
+            if (order_timeout_ns_ > 0 && (tick.timestamp_ns - order.created_time_ns) > order_timeout_ns_) {
+                ++missed_limit_fills_;
+                continue; // Order expired unfilled
+            }
+            if (marketable_limit_ticks_ > 0 && order.price > 0) {
+                const core::Price touch = (order.side == core::Side::BUY) ? book.best_ask() : book.best_bid();
+                const core::Price cap_paise = marketable_limit_ticks_ * 5; // 5 paise per NSE tick
+                if (touch > 0) {
+                    const bool price_escaped = (order.side == core::Side::BUY)
+                        ? (touch > order.price + cap_paise)
+                        : (touch < order.price - cap_paise);
+                    if (price_escaped) {
+                        if (order_timeout_ns_ == 0) {
+                            ++missed_limit_fills_;
+                            continue;
+                        }
+                        remaining.push_back(order);
+                        continue;
+                    }
+                }
             }
 
             match_order(order, book, tick.timestamp_ns);
@@ -257,6 +289,9 @@ private:
     core::Price peak_favorable_price_{0};
     core::Price worst_adverse_price_{0};
     uint64_t next_trade_id_{0};
+    core::Price marketable_limit_ticks_{0};
+    uint64_t order_timeout_ns_{0};
+    size_t missed_limit_fills_{0};
     std::vector<core::TradeAuditEntry> trade_history_;
     OrderFillCallback fill_callback_;
 };

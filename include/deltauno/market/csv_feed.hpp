@@ -5,6 +5,7 @@
 #include <atomic>
 #include <chrono>
 #include <fstream>
+#include <iostream>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -16,11 +17,13 @@ public:
     explicit CSVFeed(std::string csv_path,
                      bool simulate_realtime_delay = false,
                      core::Price tick_size_paise = 5,
-                     bool live_tail = false)
+                     bool live_tail = false,
+                     bool stdin_stream = false)
         : csv_path_(std::move(csv_path)),
           simulate_delay_(simulate_realtime_delay),
           tick_size_paise_(tick_size_paise),
-          live_tail_(live_tail) {}
+          live_tail_(live_tail),
+          stdin_stream_(stdin_stream) {}
 
     void register_callback(TickCallback cb) override {
         callback_ = std::move(cb);
@@ -31,17 +34,24 @@ public:
     }
 
     bool start() override {
-        std::ifstream file(csv_path_, std::ios::in | std::ios::binary);
-        if (!file.is_open()) return false;
+        std::ifstream file;
+        std::istream* in_stream = nullptr;
+        if (stdin_stream_ || csv_path_ == "-") {
+            in_stream = &std::cin;
+        } else {
+            file.open(csv_path_, std::ios::in | std::ios::binary);
+            if (!file.is_open()) return false;
+            in_stream = &file;
+        }
 
         is_running_.store(true, std::memory_order_release);
         std::string line;
         uint64_t prev_ts = 0;
 
         while (is_running_.load(std::memory_order_acquire)) {
-            const std::streampos line_start = live_tail_ ? file.tellg() : std::streampos(-1);
-            if (!std::getline(file, line)) {
-                if (live_tail_ && is_running_.load(std::memory_order_acquire)) {
+            const std::streampos line_start = (!stdin_stream_ && live_tail_) ? file.tellg() : std::streampos(-1);
+            if (!std::getline(*in_stream, line)) {
+                if (!stdin_stream_ && live_tail_ && is_running_.load(std::memory_order_acquire)) {
                     file.clear();
                     std::this_thread::sleep_for(std::chrono::milliseconds(5));
                     continue;
@@ -49,8 +59,8 @@ public:
                 break;
             }
 
-            // In live_tail_ mode, if EOF was hit mid-line (before '\n' was flushed), rewind and wait
-            if (live_tail_ && file.eof() && line_start != std::streampos(-1)) {
+            // In live_tail_ file mode, if EOF was hit mid-line (before '\n' was flushed), rewind and wait
+            if (!stdin_stream_ && live_tail_ && file.eof() && line_start != std::streampos(-1)) {
                 file.clear();
                 file.seekg(line_start);
                 std::this_thread::sleep_for(std::chrono::milliseconds(2));
@@ -218,6 +228,7 @@ private:
     bool simulate_delay_{false};
     core::Price tick_size_paise_{5};
     bool live_tail_{false};
+    bool stdin_stream_{false};
     std::atomic<bool> is_running_{false};
     TickCallback callback_;
     ExternalAlertCallback alert_callback_;

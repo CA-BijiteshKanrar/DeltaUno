@@ -75,6 +75,12 @@ jobs:
     steps:
       - name: Checkout DeltaUno Repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Enforce Out-of-Sample Strategy & Risk Parameter Freeze (v3.2.0 Baseline)
+        run: |
+          git diff --exit-code v3.2.0 -- include/deltauno/strategy/ include/deltauno/risk/ config/risk_limits.json config/instruments.json config/calendar_events.json
 
       - name: Build C++20 Engine (Release) & Run CTest Verification
         run: |

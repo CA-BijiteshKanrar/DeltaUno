@@ -29,6 +29,8 @@ import json
 import math
 import os
 import signal
+import socket
+import ssl
 import struct
 import subprocess
 import sys
@@ -298,9 +300,10 @@ class LiveQuoteProvider:
             return self.kotak_auth
         return None
 
-    def _angelone_login(self) -> Optional[str]:
-        if self.angel_jwt:
-            return self.angel_jwt
+    def _angelone_login_full(self) -> Optional[Tuple[str, str]]:
+        """Return (jwt_token, feed_token) from AngelOne SmartAPI."""
+        if self.angel_jwt and getattr(self, "angel_feed_token", None):
+            return (self.angel_jwt, self.angel_feed_token)
         api_key = os.environ.get("ANGELONE_API_KEY", "")
         client_code = os.environ.get("ANGELONE_CLIENT_CODE", "")
         pin = os.environ.get("ANGELONE_PIN", "")
@@ -326,8 +329,152 @@ class LiveQuoteProvider:
             data = json.loads(resp.read().decode("utf-8"))
             if data.get("status") and data.get("data", {}).get("jwtToken"):
                 self.angel_jwt = data["data"]["jwtToken"]
-                return self.angel_jwt
+                self.angel_feed_token = data["data"].get("feedToken", "")
+                return (self.angel_jwt, self.angel_feed_token)
         return None
+
+    def _angelone_login(self) -> Optional[str]:
+        res = self._angelone_login_full()
+        return res[0] if res else self.angel_jwt
+
+    def stream_angelone_websocket(self, on_csv_line, stop_fn) -> bool:
+        """
+        Connects to AngelOne SmartStream v2 Binary WebSocket (`wss://smartapisocket.angelone.in/smart-stream`),
+        subscribes to Mode 3 (Full 5-Level Snap Quote, 379-byte little-endian binary packets) for all 10 NSE stocks,
+        and pushes each event-driven L2 tick directly to `on_csv_line(csv_str)` with zero 1s polling delay.
+        Returns False if connection/handshake fails so caller can fall back to REST polling seamlessly.
+        """
+        creds = self._angelone_login_full()
+        if not creds or not creds[1]:
+            return False
+        jwt_tok, feed_tok = creds
+        api_key = os.environ.get("ANGELONE_API_KEY", "")
+        client_code = os.environ.get("ANGELONE_CLIENT_CODE", "")
+        by_angel_tok = {inst["angel_token"]: inst for inst in INSTRUMENTS}
+
+        host = "smartapisocket.angelone.in"
+        ctx = ssl.create_default_context()
+        raw_sock = socket.create_connection((host, 443), timeout=5.0)
+        tls_sock = ctx.wrap_socket(raw_sock, server_hostname=host)
+        tls_sock.settimeout(3.0)
+
+        ws_key = base64.b64encode(os.urandom(16)).decode("ascii")
+        handshake = (
+            f"GET /smart-stream HTTP/1.1\r\n"
+            f"Host: {host}\r\n"
+            f"Upgrade: websocket\r\n"
+            f"Connection: Upgrade\r\n"
+            f"Sec-WebSocket-Key: {ws_key}\r\n"
+            f"Sec-WebSocket-Version: 13\r\n"
+            f"Authorization: Bearer {jwt_tok}\r\n"
+            f"x-api-key: {api_key}\r\n"
+            f"x-client-code: {client_code}\r\n"
+            f"x-feed-token: {feed_tok}\r\n\r\n"
+        )
+        tls_sock.sendall(handshake.encode("utf-8"))
+        resp_hdr = b""
+        while b"\r\n\r\n" not in resp_hdr:
+            chunk = tls_sock.recv(1024)
+            if not chunk:
+                tls_sock.close()
+                return False
+            resp_hdr += chunk
+        if b"101" not in resp_hdr.split(b"\r\n", 1)[0]:
+            tls_sock.close()
+            return False
+
+        def send_ws_text(txt: str) -> None:
+            payload = txt.encode("utf-8")
+            mask_key = os.urandom(4)
+            plen = len(payload)
+            hdr = bytearray([0x81])
+            if plen < 126:
+                hdr.append(0x80 | plen)
+            elif plen < 65536:
+                hdr.append(0x80 | 126)
+                hdr.extend(struct.pack(">H", plen))
+            else:
+                hdr.append(0x80 | 127)
+                hdr.extend(struct.pack(">Q", plen))
+            hdr.extend(mask_key)
+            masked = bytes(b ^ mask_key[i % 4] for i, b in enumerate(payload))
+            tls_sock.sendall(bytes(hdr) + masked)
+
+        sub_msg = json.dumps({
+            "correlationID": "deltauno_l2_ws",
+            "action": 1,
+            "params": {
+                "mode": 3,
+                "tokenList": [{"exchangeType": 1, "tokens": [inst["angel_token"] for inst in INSTRUMENTS]}],
+            },
+        })
+        send_ws_text(sub_msg)
+        last_ping = time.monotonic()
+
+        def recv_exact(n: int) -> bytes:
+            buf = bytearray()
+            while len(buf) < n:
+                c = tls_sock.recv(n - len(buf))
+                if not c:
+                    raise EOFError("WebSocket closed")
+                buf.extend(c)
+            return bytes(buf)
+
+        try:
+            while not stop_fn():
+                if time.monotonic() - last_ping >= 25.0:
+                    send_ws_text("ping")
+                    last_ping = time.monotonic()
+                try:
+                    b0, b1 = recv_exact(2)
+                except socket.timeout:
+                    continue
+                opcode = b0 & 0x0F
+                masked = (b1 & 0x80) != 0
+                plen = b1 & 0x7F
+                if plen == 126:
+                    plen = struct.unpack(">H", recv_exact(2))[0]
+                elif plen == 127:
+                    plen = struct.unpack(">Q", recv_exact(8))[0]
+                mask_k = recv_exact(4) if masked else b""
+                data = recv_exact(plen)
+                if masked:
+                    data = bytes(b ^ mask_k[i % 4] for i, b in enumerate(data))
+                if opcode == 0x8:  # Close frame
+                    break
+                if opcode == 0x2 and len(data) >= 347:  # Binary Mode 3 Snap Quote packet
+                    tok_raw = data[2:27].split(b"\x00", 1)[0].decode("ascii", errors="ignore").strip()
+                    inst = by_angel_tok.get(tok_raw)
+                    if not inst:
+                        continue
+                    ltp = struct.unpack("<q", data[43:51])[0] / 100.0
+                    ltq = struct.unpack("<q", data[51:59])[0]
+                    vol = struct.unpack("<q", data[67:75])[0]
+                    uc = struct.unpack("<q", data[347:355])[0] / 100.0 if len(data) >= 355 else ltp * 1.10
+                    lc = struct.unpack("<q", data[355:363])[0] / 100.0 if len(data) >= 363 else ltp * 0.90
+                    bids, asks = [], []
+                    base_off = 147
+                    for i in range(5):
+                        off = base_off + i * 20
+                        bq = struct.unpack("<q", data[off + 2 : off + 10])[0]
+                        bp = struct.unpack("<q", data[off + 10 : off + 18])[0] / 100.0
+                        if bp > 0 and bq > 0:
+                            bids.append((bp, int(bq)))
+                    for i in range(5):
+                        off = base_off + 100 + i * 20
+                        aq = struct.unpack("<q", data[off + 2 : off + 10])[0]
+                        ap = struct.unpack("<q", data[off + 10 : off + 18])[0] / 100.0
+                        if ap > 0 and aq > 0:
+                            asks.append((ap, int(aq)))
+                    ts_ns = time.time_ns()
+                    csv_line = self._format_l2_csv_line(ts_ns, inst, ltp, int(max(1, ltq)), int(max(1, vol)), bids, asks, uc, lc)
+                    on_csv_line(csv_line)
+        finally:
+            try:
+                tls_sock.close()
+            except Exception:
+                pass
+        return True
 
     def fetch_all_ticks(self) -> List[str]:
         """
@@ -893,6 +1040,16 @@ class GoogleSheetsLiveSync:
             "HARVESTER": {"equity": float(initial_harv_equity), "pnl": float(initial_harv_equity - 10000.0), "trades": 0, "wins": 0, "open_pos": "FLAT"},
             "OMNI": {"equity": float(initial_omni_equity), "pnl": float(initial_omni_equity - 10000.0), "trades": 0, "wins": 0, "open_pos": "FLAT"},
         }
+        self.latest_ltp_by_sym: Dict[str, float] = {}
+        self.pending_signals: List[Dict[str, Any]] = []
+        self.signal_log_path = REPO_ROOT / "data" / f"signal_forward_returns_{datetime.now(TZ_IST).strftime('%Y%m%d')}.csv"
+        if not self.signal_log_path.exists():
+            try:
+                self.signal_log_path.parent.mkdir(parents=True, exist_ok=True)
+                with open(self.signal_log_path, "w", encoding="utf-8", newline="\n") as sf:
+                    sf.write("timestamp_ist,ts_ns,track,symbol,side,status,qty,target_price,sl,tp,ofi,fwd_1m_bps,fwd_5m_bps,fwd_15m_bps,fwd_eod_bps\n")
+            except Exception:
+                pass
 
     @property
     def enabled(self) -> bool:
@@ -927,6 +1084,23 @@ class GoogleSheetsLiveSync:
             self.ticks_streamed += add_ticks
             if parsed:
                 self.latest_quotes = parsed
+                for item in parsed:
+                    self.latest_ltp_by_sym[item["symbol"]] = float(item["ltp"])
+            now_mono = time.monotonic()
+            for sig in self.pending_signals:
+                cur_p = self.latest_ltp_by_sym.get(sig["symbol"], 0.0)
+                if cur_p <= 0 or sig["target"] <= 0:
+                    continue
+                elapsed = now_mono - sig["mono_ts"]
+                sign = -1.0 if sig["side"] == "SHORT" else 1.0
+                bps = sign * ((cur_p - sig["target"]) / sig["target"]) * 10000.0
+                if sig["fwd_1m"] is None and elapsed >= 60.0:
+                    sig["fwd_1m"] = round(bps, 2)
+                if sig["fwd_5m"] is None and elapsed >= 300.0:
+                    sig["fwd_5m"] = round(bps, 2)
+                if sig["fwd_15m"] is None and elapsed >= 900.0:
+                    sig["fwd_15m"] = round(bps, 2)
+                sig["fwd_eod"] = round(bps, 2)
 
     def _build_dashboard_dict(self, status: str = "LIVE_RUNNING") -> Dict[str, Any]:
         now_str = datetime.now(TZ_IST).strftime("%Y-%m-%d %H:%M:%S IST")
@@ -979,7 +1153,30 @@ class GoogleSheetsLiveSync:
             return False
 
     def on_engine_live_event(self, ev: Dict[str, Any]) -> None:
-        if ev.get("type") != "FILL":
+        ev_type = ev.get("type")
+        now_str = datetime.now(TZ_IST).strftime("%Y-%m-%d %H:%M:%S IST")
+        if ev_type == "SIGNAL":
+            with self.lock:
+                self.pending_signals.append({
+                    "timestamp_ist": now_str,
+                    "ts_ns": int(ev.get("ts_ns", 0)),
+                    "mono_ts": time.monotonic(),
+                    "track": ev.get("track", ""),
+                    "symbol": ev.get("symbol", ""),
+                    "side": ev.get("side", "BUY"),
+                    "status": ev.get("status", ""),
+                    "qty": int(ev.get("qty", 0)),
+                    "target": float(ev.get("target", 0.0)),
+                    "sl": float(ev.get("sl", 0.0)),
+                    "tp": float(ev.get("tp", 0.0)),
+                    "ofi": float(ev.get("ofi", 0.0)),
+                    "fwd_1m": None,
+                    "fwd_5m": None,
+                    "fwd_15m": None,
+                    "fwd_eod": 0.0,
+                })
+            return
+        if ev_type != "FILL":
             return
         trk_name = ev.get("track", "COMPOUNDER")
         side = ev.get("side", "")
@@ -1027,6 +1224,28 @@ class GoogleSheetsLiveSync:
             "dashboard": dash,
         }
         threading.Thread(target=self._post_json, args=(payload,), daemon=True).start()
+
+    def flush_signal_forward_log(self) -> None:
+        """Write all observed signals (TAKEN, SLOT_BUSY, and Risk-Rejected) and their 1m/5m/15m/EOD forward returns."""
+        with self.lock:
+            rows = list(self.pending_signals)
+        if not rows:
+            return
+        try:
+            with open(self.signal_log_path, "w", encoding="utf-8", newline="\n") as sf:
+                sf.write("timestamp_ist,ts_ns,track,symbol,side,status,qty,target_price,sl,tp,ofi,fwd_1m_bps,fwd_5m_bps,fwd_15m_bps,fwd_eod_bps\n")
+                for s in rows:
+                    f1 = "" if s["fwd_1m"] is None else f"{s['fwd_1m']:+.2f}"
+                    f5 = "" if s["fwd_5m"] is None else f"{s['fwd_5m']:+.2f}"
+                    f15 = "" if s["fwd_15m"] is None else f"{s['fwd_15m']:+.2f}"
+                    feod = f"{s['fwd_eod']:+.2f}"
+                    sf.write(
+                        f"{s['timestamp_ist']},{s['ts_ns']},{s['track']},{s['symbol']},{s['side']},"
+                        f"\"{s['status']}\",{s['qty']},{s['target']:.2f},{s['sl']:.2f},{s['tp']:.2f},"
+                        f"{s['ofi']:.4f},{f1},{f5},{f15},{feod}\n"
+                    )
+        except Exception as e:
+            print(f"[WARN] Could not write signal forward return log: {e}", flush=True)
 
     def push_heartbeat(self, status: str = "LIVE_RUNNING") -> bool:
         if not self.enabled:
@@ -1219,8 +1438,7 @@ def main() -> int:
     cmd = [
         str(engine_bin),
         "--mode", args.mode,
-        "--live-tail",
-        "--csv", str(live_csv),
+        "--stdin-stream",
         "--capital", f"{comp_init_cap:.2f}",
         "--harv-capital", f"{harv_init_cap:.2f}",
         "--omni-capital", f"{omni_init_cap:.2f}",
@@ -1228,6 +1446,7 @@ def main() -> int:
     proc = subprocess.Popen(
         cmd,
         cwd=REPO_ROOT,
+        stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
@@ -1266,40 +1485,72 @@ def main() -> int:
     last_heartbeat = 0.0
     init_ist = datetime.now(TZ_IST)
     started_before_close = init_ist.hour < 15 or (init_ist.hour == 15 and init_ist.minute < 15)
-    last_tick_batch: List[str] = []
+    last_tick_batch_map: Dict[str, str] = {}
+    ws_write_lock = threading.Lock()
+
+    def should_stop_session() -> bool:
+        if stop_requested or proc.poll() is not None:
+            return True
+        now_t = datetime.now(TZ_IST)
+        if started_before_close and (now_t.hour > 15 or (now_t.hour == 15 and now_t.minute >= 15)):
+            return True
+        if args.max_runtime_minutes > 0 and ((time.monotonic() - start_monotonic) / 60.0) >= args.max_runtime_minutes:
+            return True
+        return False
 
     try:
         with open(live_csv, "a", encoding="utf-8", newline="\n") as f:
-            while not stop_requested and proc.poll() is None:
-                now_ist = datetime.now(TZ_IST)
-                # Automatically end session at 15:15:00 IST (1 minute after 15:14:00 IST engine auto-squareoff)
-                if started_before_close and (now_ist.hour > 15 or (now_ist.hour == 15 and now_ist.minute >= 15)):
-                    print("\n[MARKET CLOSE] 15:15 IST reached (post 15:14 IST square-off). Closing live session cleanly...", flush=True)
-                    break
+            def emit_tick_lines(lines_to_emit: List[str]) -> None:
+                nonlocal last_heartbeat
+                with ws_write_lock:
+                    for ln in lines_to_emit:
+                        f.write(ln + "\n")
+                        if proc.stdin and proc.poll() is None:
+                            try:
+                                proc.stdin.write(ln + "\n")
+                            except Exception:
+                                pass
+                        cols = ln.split(",", 3)
+                        if len(cols) >= 3 and cols[2] != "NIFTY":
+                            last_tick_batch_map[cols[2]] = ln
+                    f.flush()
+                    if proc.stdin and proc.poll() is None:
+                        try:
+                            proc.stdin.flush()
+                        except Exception:
+                            pass
+                sheets_sync.update_quotes(lines_to_emit, add_ticks=len(lines_to_emit))
+                if sheets_sync.enabled and (time.monotonic() - last_heartbeat >= 60.0):
+                    last_heartbeat = time.monotonic()
+                    threading.Thread(target=sheets_sync.push_heartbeat, daemon=True).start()
 
-                if args.max_runtime_minutes > 0:
-                    elapsed_min = (time.monotonic() - start_monotonic) / 60.0
-                    if elapsed_min >= args.max_runtime_minutes:
-                        print(f"\n[MAX RUNTIME] {args.max_runtime_minutes:.1f} min reached. Closing session cleanly...", flush=True)
-                        break
+            # Tier 1 Ideal Transport: Event-driven Binary WebSocket Push (AngelOne SmartStream v2 Mode 3)
+            # Streams every L2 book update immediately into C++ stdin pipe with zero 1s polling delay.
+            if provider.provider == "angelone":
+                def on_ws_tick(csv_line: str) -> None:
+                    batch = [csv_line]
+                    nifty_res = provider.fetch_nifty_quote()
+                    if nifty_res:
+                        n_line, n_ltp, n_ret = nifty_res
+                        batch.append(n_line)
+                        sheets_sync.set_nifty_regime(n_ltp, n_ret)
+                    emit_tick_lines(batch)
 
+                try:
+                    print("[WEBSOCKET] Connecting to AngelOne SmartStream v2 Binary L2 WebSocket...", flush=True)
+                    provider.stream_angelone_websocket(on_ws_tick, should_stop_session)
+                except Exception as ws_err:
+                    print(f"[WARN] Binary WebSocket stream interrupted ({ws_err}); continuing via REST failover...", flush=True)
+
+            # Fallback / Secondary loop if WebSocket exited before market close or non-WS provider selected
+            while not should_stop_session():
                 tick_lines = provider.fetch_all_ticks()
-                if tick_lines:
-                    last_tick_batch = list(tick_lines)
                 nifty_res = provider.fetch_nifty_quote()
                 if nifty_res:
                     n_line, n_ltp, n_ret = nifty_res
                     tick_lines.append(n_line)
                     sheets_sync.set_nifty_regime(n_ltp, n_ret)
-                for line in tick_lines:
-                    f.write(line + "\n")
-                f.flush()
-
-                sheets_sync.update_quotes(tick_lines, add_ticks=len(tick_lines))
-                if sheets_sync.enabled and (time.monotonic() - last_heartbeat >= 60.0):
-                    last_heartbeat = time.monotonic()
-                    threading.Thread(target=sheets_sync.push_heartbeat, daemon=True).start()
-
+                emit_tick_lines(tick_lines)
                 time.sleep(args.poll_interval)
     finally:
         with open(live_csv, "a", encoding="utf-8", newline="\n") as f:
@@ -1310,6 +1561,7 @@ def main() -> int:
                 sheets_sync.tracks[t]["open_pos"] != "FLAT"
                 for t in ("COMPOUNDER", "HARVESTER", "OMNI")
             )
+            last_tick_batch = list(last_tick_batch_map.values())
             if has_open and last_tick_batch and proc.poll() is None:
                 print("[EOD SAFETY] Open positions detected at session exit; emitting 15:14:01 IST auto-squareoff ticks...", flush=True)
                 sq_dt = datetime.now(TZ_IST).replace(hour=15, minute=14, second=1, microsecond=0)
@@ -1319,13 +1571,32 @@ def main() -> int:
                     for raw_l in last_tick_batch:
                         parts = raw_l.split(",", 1)
                         if len(parts) == 2:
-                            f.write(f"{ts_val},{parts[1]}\n")
+                            sq_ln = f"{ts_val},{parts[1]}\n"
+                            f.write(sq_ln)
+                            if proc.stdin:
+                                try:
+                                    proc.stdin.write(sq_ln)
+                                except Exception:
+                                    pass
                     f.flush()
+                    if proc.stdin:
+                        try:
+                            proc.stdin.flush()
+                        except Exception:
+                            pass
                     time.sleep(0.5)
             f.write("#SESSION_END\n")
             f.flush()
+            if proc.stdin:
+                try:
+                    proc.stdin.write("#SESSION_END\n")
+                    proc.stdin.flush()
+                    proc.stdin.close()
+                except Exception:
+                    pass
         proc.wait(timeout=15.0)
         reader_thread.join(timeout=3.0)
+        sheets_sync.flush_signal_forward_log()
         if sheets_sync.enabled:
             sheets_sync.push_daily_summary()
 
