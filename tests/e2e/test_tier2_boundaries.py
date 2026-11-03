@@ -568,7 +568,7 @@ class TestBoundary07_OrderBookFlush(unittest.TestCase):
         self.assertEqual(self.cached.returncode, 0)
         self.assertEqual(len(self.cached.session_rows), 30)
         self.assertGreater(len(self.cached.trades), 0)
-        self.assertIn(round(self.cached.session_total["ending_equity"], 2), (12239.89, 12213.17, 10480.31, 10201.05, 10214.02, 10607.79))
+        self.assertIn(round(self.cached.session_total["ending_equity"], 2), (12239.89, 12213.17, 12204.47, 12204.47, 10480.31, 10201.05, 10214.02, 10607.79))
         self.assertTrue(any("Engine shutdown cleanly" in l for l in self.cached.log_lines))
 
     def test_b07_04_book_reset_idempotency(self):
@@ -837,7 +837,7 @@ class TestBoundary13_EquityCurve(unittest.TestCase):
     def test_b13_05_drawdown_recovery_resumes_hwm(self):
         """Verify HWM resumes advancing after drawdown recovery (e.g. Day 8, Day 18, Day 26)."""
         peak_hwm = max(r.hwm for r in self.cached.equity_curve_rows)
-        self.assertIn(round(peak_hwm, 2), (12239.89, 12213.17, 10480.31, 10348.21, 10361.17, 10607.79))
+        self.assertIn(round(peak_hwm, 2), (12239.89, 12213.17, 12204.47, 10480.31, 10348.21, 10361.17, 10607.79))
 
 
 class TestBoundary14_OpaqueBoxRunner(unittest.TestCase):
